@@ -6034,48 +6034,49 @@ class pgSQL_Tables:
 class pgSQL:
 
     def __init__(self):
-        import                                  datetime            as dt
+        import                                  datetime                as dt
         from time                           import sleep
         from urllib                         import quote_plus,unquote
-        from re                             import findall          as re_findall
-        from re                             import sub              as re_sub           # re_sub('patt','repl','str','cnt')
-        from re                             import search           as re_search        # re_search('patt','str')
-        from subprocess                     import Popen            as sub_popen
-        from subprocess                     import PIPE             as sub_PIPE
-        from traceback                      import format_exc       as tb_format_exc
-        from sys                            import exc_info         as sys_exc_info
+        from re                             import findall              as re_findall
+        from re                             import sub                  as re_sub           # re_sub('patt','repl','str','cnt')
+        from re                             import search               as re_search        # re_search('patt','str')
+        from subprocess                     import Popen                as sub_popen
+        from subprocess                     import PIPE                 as sub_PIPE
+        from traceback                      import format_exc           as tb_format_exc
+        from sys                            import exc_info             as sys_exc_info
         from types                          import NoneType
-        from time                           import sleep            as delay
-        from uuid                           import uuid4            as get_guid
-        from os                             import environ          as os_environ
-        from sys                            import path             as py_path
+        from time                           import sleep                as delay
+        from uuid                           import uuid4                as get_guid
+        from f_geolocation                  import Addr_Parsing,Geocoding
         from routing_settings               import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
         from py_classes                     import To_Class
-        import                                  pandas          as pd
+        import                                  pandas                  as pd
         pd.set_option(                          'expand_frame_repr', False)
         pd.set_option(                          'display.max_columns', None)
+        pd.set_option(                          'display.max_colwidth', 250)
         pd.set_option(                          'display.max_rows', 1000)
-        pd.set_option(                          'display.width', 180)
+        pd.set_option(                          'display.width', 1500)
+        pd.set_option(                          'display.colheader_justify','left')
         np                                  =   pd.np
-        np.set_printoptions(                    linewidth=200,threshold=np.nan)
-        import                                  geopandas       as gd
+        np.set_printoptions(                    linewidth=1500,threshold=np.nan)
+        import                                  geopandas               as gd
         from sqlalchemy                         import create_engine
         from logging                            import getLogger
         from logging                            import INFO             as logging_info
         getLogger(                              'sqlalchemy.dialects.postgresql').setLevel(logging_info)
-        eng                                 =   create_engine(r'postgresql://postgres:postgres@%s:%s/%s'
-                                                          %(DB_HOST,DB_PORT,DB_NAME),
+        eng                                 =   create_engine(r'postgresql://%s:%s@%s:%s/%s'
+                                                          %(DB_USER,DB_PW,DB_HOST,DB_PORT,DB_NAME),
                                                           encoding='utf-8',
                                                           echo=False)
         from psycopg2                           import connect          as pg_connect
         conn                                =   pg_connect("dbname='%s' " % DB_NAME +
-                                                             "user='%s' " % DB_USER +
-                                                             "host='%s' password='%s' port=%s"
-                                                             % (DB_HOST,DB_PW,DB_PORT));
+                                                           "user='%s' " % DB_USER +
+                                                           "host='%s' password='%s' port=%s"
+                                                           % (DB_HOST,DB_PW,DB_PORT));
         cur                                 =   conn.cursor()
 
-        D                                   =   {'guid'         :   str(get_guid().hex)[:7]}
-        D.update(                               {'tmp_tbl'      :   'tmp_'+D['guid']})
+        D                                   =   {'guid'                 :   str(get_guid().hex)[:7]}
+        D.update(                               {'tmp_tbl'              :   'tmp_'+D['guid']})
         self.T                              =   To_Class(D)
         all_imports                         =   locals().keys() #+ globals().keys()
         for k in all_imports:
@@ -6087,6 +6088,7 @@ class pgSQL:
         # from f_geolocation import get_bldg_street_idx
         # from f_geolocation import get_addr_body,match_simple_regex
         # from f_geolocation import match_simple,match_simple_regex,match_levenshtein_series
+
 
         self.Functions                      =   pgSQL_Functions(self)
         self.Triggers                       =   pgSQL_Triggers(self)

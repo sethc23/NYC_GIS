@@ -1,21 +1,23 @@
 
-from os                                     import environ          as os_environ
-from sys                                    import path             as py_path
-py_path                                     =   py_path
-py_path.append(                                 os_environ['HOME'] + '/.scripts')
-from py_classes                             import *
-
-# from ipdb import set_trace as i_trace; i_trace()
+from ipdb import set_trace as i_trace
+## i_trace()
 
 
 class Geocoding:
 
-    def __init__(self,_parent):
-        self.SV                             =   _parent
-        self.T                              =   _parent.T
-        self.GeoCoding                      =   self
+    def __init__(self,_parent_dict=None):
+        self.T                              =   GeoLibrary().T if not _parent_dict else _parent_dict
+        assert self.T.__class__.__name__=='To_Class'
+
+        # Load all functions of this class into parent dict
+        for it in dir(self):
+            if getattr(self,it).__class__.__name__=='instancemethod' and it[0]!='_':
+                self.T.update(                  { it                    :   getattr(self,it) } )
+
         from pygeocoder                         import Geocoder  # sudo port select python python26
         self.T.update(                          {'Geocoder'           :   Geocoder })
+
+        globals().update(                        self.T.__getdict__())
         # generally             --
         # java version          -- https://developers.google.com/maps/documentation/javascript/geocoding
         # java limits           -- https://developers.google.com/maps/documentation/geocoding/#Limits
@@ -230,127 +232,21 @@ class Geocoding:
     #                        bot_right[0]+'\t'+str(test_lat[bot_right[1]])+','+str(test_long[bot_right[1]]))
         for it in results: print it
 
-
-
 class Addr_Parsing:
 
-    def __init__(self):
-        from types                              import NoneType
-        from re                                 import sub              as re_sub
-        import                                  pandas                  as pd
-        pd.set_option(                          'expand_frame_repr', False)
-        pd.set_option(                          'display.max_columns', None)
-        pd.set_option(                          'display.max_rows', 1000)
-        pd.set_option(                          'display.width', 180)
-        np                                  =   pd.np
-        np.set_printoptions(                    linewidth=200,threshold=np.nan)
-        from os                                 import environ          as os_environ
-        from uuid                               import uuid4            as get_guid
-        from sys                                import path             as py_path
-        py_path                             =   py_path
-        py_path.append(                         os_environ['HOME'] + '/.scripts')
-        from system_settings                    import DB_HOST,DB_PORT
-        from sqlalchemy                         import create_engine
-        from logging                            import getLogger
-        from logging                            import INFO             as logging_info
-        getLogger(                              'sqlalchemy.dialects.postgresql').setLevel(logging_info)
-        eng                                 =   create_engine(r'postgresql://postgres:postgres@%s:%s/%s'
-                                                          %(DB_HOST,DB_PORT,'routing'),
-                                                          encoding='utf-8',
-                                                          echo=False)
-        D                                   =   {'NoneType'         :   NoneType,
-                                                 're_sub'           :   re_sub,
-                                                 'pd'               :   pd,
-                                                 'np'               :   np,
-                                                 'eng'              :   eng,
-                                                 'guid'             :   str(get_guid().hex)[:7]}
-        self.T                              =   To_Class(D)
-        self.ST_Parts                       =   self.ST_Parts(self)
+    def __init__(self,_parent_dict=None):
 
+        self.T                              =   GeoLibrary().T if not _parent_dict else _parent_dict
+        assert self.T.__class__.__name__=='To_Class'
 
-    class ST_Parts:
+        if not hasattr(self,'ST_Parts'):
+            self.ST_Parts                   =   ST_Parts()
 
-        def __init__(self,_parent):
-
-            ST_STRIP_BEFORE_DICT            =   {
-                                                    r'(,|"|'+r"')"                  :r'',
-                                                    r'(\s){2,}'                     :r' ',
-                                                    r'(?P<num>[0-9])(\s)(th)'       :r'\g<num>th',
-                                                    }
-
-            ST_PREFIX_DICT = {  r'east'         :r'e',
-                                r'north'        :r'n',
-                                r'south'        :r's',
-                                r'west'         :r'w',
-                                }
-
-            ST_SUFFIX_DICT = {  'alley'         :r'aly',
-                                'avenue'        :r'ave',
-                                'boulevard'     :r'blvd',
-                                'circle'        :r'cir',
-                                'court'         :r'ct',
-                                'drive'         :r'dr',
-                                'east'          :r'e',
-                                'highway'       :r'hwy',
-                                'island'        :r'isle',
-                                'lane'          :r'ln',
-                                'market'        :r'mkt',
-                                'north'         :r'n',
-                                'parkway'       :r'pkwy',
-                                'place'         :r'pl',
-                                'plaza'         :r'plz',
-                                'road'          :r'rd',
-                                'south'         :r's',
-                                'square'        :r'sq',
-                                'street'        :r'st',
-                                'terrace'       :r'ter',
-                                'west'          :r'w',
-                                }
-
-            ST_BODY_DICT = {    r'\s(north)\s'          :r' n ',
-                                r'\s(south)\s'          :r' s ',
-                                r'\s(west)\s'           :r' w ',
-                                r'\s(east)\s'           :r' e ',
-                                r'\s(avenue)\s'         :r' ave ',
-                                r'\s(place)\s'          :r' pl ',
-                                r'\s(square)\s'         :r' sq ',
-                                r'\s(terrace)\s'        :r' ter ',
-
-                                r'(1st|first)'          :r'1',
-                                r'(2nd|second)'         :r'2',
-                                r'(3rd|third)'          :r'3',
-                                r'(4th|fourth)'         :r'4',
-                                r'(5th|fifth)'          :r'5',
-                                r'(6th|sixth)'          :r'6',
-                                r'(7th|seventh)'        :r'7',
-                                r'(8th|eigth)'          :r'8',
-                                r'(9th|nineth|ninth)'   :r'9',
-                                r'(0th)'                :r'0',
-                                r'(1th)'                :r'1',
-                                r'(2th)'                :r'2',
-                                r'(3th)'                :r'3',
-
-                                r'(tenth)'              :r'10',
-                                r'(eleventh)'           :r'11',
-                                r'(twelth|twelfth)'     :r'12',
-
-                                r'(ave[nues]*)\s(of)(\s(the))?\s(amer[icas]*)$'       :r'6 ave',
-
-                                r'^(st.|st)\s'           :r'saint ',
-                                r'^fort\s'               :r'ft ',
-                                r'^f\sd\sr\s'            :r'fdr ',
-
-                                }
-
-            ST_STRIP_AFTER_DICT =   {
-                                    r'(\.|,|\-)'         :r'',
-                                    }
-            self.ST_STRIP_BEFORE_DICT       =   ST_STRIP_BEFORE_DICT
-            self.ST_PREFIX_DICT             =   ST_PREFIX_DICT
-            self.ST_SUFFIX_DICT             =   ST_SUFFIX_DICT
-            self.ST_BODY_DICT               =   ST_BODY_DICT
-            self.ST_STRIP_AFTER_DICT        =   ST_STRIP_AFTER_DICT
-
+        # Load all functions of this class into parent dict
+        for it in dir(self):
+            if getattr(self,it).__class__.__name__=='instancemethod' and it[0]!='_':
+                self.T.update(                  { it                    :   getattr(self,it) } )
+        globals().update(                        self.T.__getdict__())
 
     def find_addr_idx_matches(self,addr_list):
         cmd = ('select * from addr_idx '+
@@ -663,83 +559,130 @@ class Addr_Parsing:
 
         return df.append(                   df_ignore)
 
-class GeoLocation:
+class GeoLibrary:
 
     def __init__(self):
 
-        from re                             import sub              as re_sub           # re_sub('patt','repl','str','cnt')
-        from os                             import environ          as os_environ
-        from uuid                           import uuid4            as get_guid
-        from sys                            import path             as py_path
-        py_path                             =   py_path
-        py_path.append(                         os_environ['HOME'] + '/.scripts')
-        from system_settings                import DB_HOST,DB_PORT
-        import                                  pandas          as pd
-        # from pandas.io.sql                import execute              as sql_cmd
-        self.T.pd.set_option(                              'expand_frame_repr', False)
-        self.T.pd.set_option(                              'display.max_columns', None)
-        self.T.pd.set_option(                              'display.max_rows', 1000)
-        self.T.pd.set_option(                              'display.width', 180)
-        np                                  =   self.T.pd.np
-        np.set_printoptions(                    linewidth=200,threshold=np.nan)
-        import                                  geopandas       as gd
+        from py_classes                         import To_Class
+        from uuid                               import uuid4            as get_guid
+        from types                              import NoneType
+        from re                                 import sub              as re_sub               # re_sub('patt','repl','str','cnt')
+        from re                                 import search           as re_search            # re_search('patt','str')
+        import                                  pandas                  as pd
+        pd.set_option(                          'expand_frame_repr', False)
+        pd.set_option(                          'display.max_columns', None)
+        pd.set_option(                          'display.max_colwidth', 250)
+        pd.set_option(                          'display.max_rows', 1000)
+        pd.set_option(                          'display.width', 1500)
+        pd.set_option(                          'display.colheader_justify','left')
+        np                                  =   pd.np
+        np.set_printoptions(                    linewidth=1500,threshold=np.nan)
+        from routing_settings                   import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
         from sqlalchemy                         import create_engine
         from logging                            import getLogger
         from logging                            import INFO             as logging_info
-        getLogger(                                  'sqlalchemy.dialects.postgresql').setLevel(logging_info)
-        eng                                 =   create_engine(r'postgresql://postgres:postgres@%s:%s/%s'
-                                                          %(DB_HOST,DB_PORT,'routing'),
+        getLogger(                              'sqlalchemy.dialects.postgresql').setLevel(logging_info)
+        eng                                 =   create_engine(r'postgresql://%s:%s@%s:%s/%s'
+                                                          %(DB_NAME,DB_USER,DB_HOST,DB_PORT,DB_NAME),
                                                           encoding='utf-8',
                                                           echo=False)
-        from psycopg2                           import connect          as pg_connect
-        pd                                  =   pd
-        gd                                  =   gd
-        conn                                =   pg_connect("dbname='routing' "+
-                                                             "user='postgres' "+
-                                                             "host='%s' password='' port=8800" % DB_HOST);
-        cur                                 =   conn.cursor()
-        all_imports                         =   locals().keys()
-        D                                   =   {'pd'           :   pd,
-                                                 'np'           :   np,
-                                                 'gd'           :   gd,
-                                                 'conn'         :   conn,
-                                                 'cur'          :   cur,
-                                                 'eng'          :   eng,
-                                                 'os_environ'   :   os_environ,
-                                                 'py_path'      :   py_path,
-                                                 'guid'         :   str(get_guid().hex)[:7]}
-        for k in all_imports:
-            if not D.has_key(k):
-                D.update(                       {k                      :   eval(k) })
+        D                                   =   {'guid'                 :   str(get_guid().hex)[:7]}
         self.T                              =   To_Class(D)
-        self.Addr_Parsing                   =   Addr_Parsing()
-        self.GeoCoding                      =   Geocoding()
+        all_imports                         =   locals().keys() #+ globals().keys()
+        for k in all_imports:
+            if not k=='D' and not k=='self':
+                self.T.update(                  {k                      :   eval(k) })
+        globals().update(                       self.T.__getdict__())
 
+        self.ST_Parts                       =   ST_Parts()
+        self.Addr_Parsing                   =   Addr_Parsing(self.T)
+        self.GeoCoding                      =   Geocoding(self.T)
 
-        # BASE_SAVE_PATH = '/Users/admin/Projects/GIS/table_data/'
+class ST_Parts:
+
+    def __init__(self):
+
+        ST_STRIP_BEFORE_DICT            =   {
+                                                r'(,|"|'+r"')"                  :r'',
+                                                r'(\s){2,}'                     :r' ',
+                                                r'(?P<num>[0-9])(\s)(th)'       :r'\g<num>th',
+                                                }
+
+        ST_PREFIX_DICT = {  r'east'         :r'e',
+                            r'north'        :r'n',
+                            r'south'        :r's',
+                            r'west'         :r'w',
+                            }
+
+        ST_SUFFIX_DICT = {  'alley'         :r'aly',
+                            'avenue'        :r'ave',
+                            'boulevard'     :r'blvd',
+                            'circle'        :r'cir',
+                            'court'         :r'ct',
+                            'drive'         :r'dr',
+                            'east'          :r'e',
+                            'highway'       :r'hwy',
+                            'island'        :r'isle',
+                            'lane'          :r'ln',
+                            'market'        :r'mkt',
+                            'north'         :r'n',
+                            'parkway'       :r'pkwy',
+                            'place'         :r'pl',
+                            'plaza'         :r'plz',
+                            'road'          :r'rd',
+                            'south'         :r's',
+                            'square'        :r'sq',
+                            'street'        :r'st',
+                            'terrace'       :r'ter',
+                            'west'          :r'w',
+                            }
+
+        ST_BODY_DICT = {    r'\s(north)\s'          :r' n ',
+                            r'\s(south)\s'          :r' s ',
+                            r'\s(west)\s'           :r' w ',
+                            r'\s(east)\s'           :r' e ',
+                            r'\s(avenue)\s'         :r' ave ',
+                            r'\s(place)\s'          :r' pl ',
+                            r'\s(square)\s'         :r' sq ',
+                            r'\s(terrace)\s'        :r' ter ',
+
+                            r'(1st|first)'          :r'1',
+                            r'(2nd|second)'         :r'2',
+                            r'(3rd|third)'          :r'3',
+                            r'(4th|fourth)'         :r'4',
+                            r'(5th|fifth)'          :r'5',
+                            r'(6th|sixth)'          :r'6',
+                            r'(7th|seventh)'        :r'7',
+                            r'(8th|eigth)'          :r'8',
+                            r'(9th|nineth|ninth)'   :r'9',
+                            r'(0th)'                :r'0',
+                            r'(1th)'                :r'1',
+                            r'(2th)'                :r'2',
+                            r'(3th)'                :r'3',
+
+                            r'(tenth)'              :r'10',
+                            r'(eleventh)'           :r'11',
+                            r'(twelth|twelfth)'     :r'12',
+
+                            r'(ave[nues]*)\s(of)(\s(the))?\s(amer[icas]*)$'       :r'6 ave',
+
+                            r'^(st.|st)\s'           :r'saint ',
+                            r'^fort\s'               :r'ft ',
+                            r'^f\sd\sr\s'            :r'fdr ',
+
+                            }
+
+        ST_STRIP_AFTER_DICT =   {
+                                r'(\.|,|\-)'         :r'',
+                                }
+        for it in locals().keys():
+            if not it=='self':
+                setattr(self,it,eval(it))
 
 
 if __name__ == '__main__':
 
     gc = Geocoding()
-    gc.fileWithAddresses = '/Users/admin/Desktop/work_locations.txt'
+    gc.fileWithAddresses = '~/Desktop/work_locations.txt'
     gc.getGPScoord(fileWithAddresses,printGPS=True,save=False,reverse=False)
     #get_reverse_geo(fileWithAddresses)
-    #
-
-
-
-	#getTriCoorLocations()
-    #p1 = ["40.522064", "-74.198690799999994"]
-    #p2 = ["40.6175608", "-73.941171400000002"]
-#    dist=getArcLenBtCoords(p1[0], p1[1], p2[0], p2[1])
-#    print dist
-    #print dist
-#    from geopy import geocoders
-#        from geopy.point import Point
-#    from geopy import distance
-#_, ne = g.geocode('Newport, RI')
-#_, cl = g.geocode('Cleveland, OH')
-#    distance.distance(p1, p2).miles
-
-#
