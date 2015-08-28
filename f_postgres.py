@@ -6046,17 +6046,12 @@ class pgSQL:
         from sys                            import exc_info         as sys_exc_info
         from types                          import NoneType
         from time                           import sleep            as delay
-        from os                             import environ          as os_environ
         from uuid                           import uuid4            as get_guid
+        from os                             import environ          as os_environ
         from sys                            import path             as py_path
-        py_path                             =   py_path
-        py_path.append(                         os_environ['HOME'] + '/.scripts')
-        from routing_settings               import DB_HOST,DB_PORT,DB_USER,DB_PW,DB_TBL
+        from routing_settings               import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
         from py_classes                     import To_Class
-        # from System_Control               import System_Reporter
-        # SYS_r                               =   System_Reporter()
         import                                  pandas          as pd
-        # from pandas.io.sql                import execute              as sql_cmd
         pd.set_option(                          'expand_frame_repr', False)
         pd.set_option(                          'display.max_columns', None)
         pd.set_option(                          'display.max_rows', 1000)
@@ -6069,11 +6064,11 @@ class pgSQL:
         from logging                            import INFO             as logging_info
         getLogger(                              'sqlalchemy.dialects.postgresql').setLevel(logging_info)
         eng                                 =   create_engine(r'postgresql://postgres:postgres@%s:%s/%s'
-                                                          %(DB_HOST,DB_PORT,DB_TBL),
+                                                          %(DB_HOST,DB_PORT,DB_NAME),
                                                           encoding='utf-8',
                                                           echo=False)
         from psycopg2                           import connect          as pg_connect
-        conn                                =   pg_connect("dbname='%s' " % DB_TBL +
+        conn                                =   pg_connect("dbname='%s' " % DB_NAME +
                                                              "user='%s' " % DB_USER +
                                                              "host='%s' password='%s' port=%s"
                                                              % (DB_HOST,DB_PW,DB_PORT));
