@@ -13,29 +13,63 @@ class pgSQL_Functions:
     """
 
     def __init__(self,_parent):
-        self.T                              =   _parent.T
-        self.Make                           =   self.Make(self)
-        self.Run                            =   self.Run(self)
+        self                                =   _parent.T.To_Sub_Classes(self,_parent)
 
     class Run:
 
         def __init__(self,_parent):
-            self.T                          =   _parent.T
-            self.Run                        =   self
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
 
-        def make_column_primary_serial_key(self,table_name,uid_col,is_new_col=True):
+        def check_evt_trigger_enabled(self,trigger_name):
+            qry                             =   """ select evtenabled::text='O'::text enabled
+                                                    from pg_event_trigger
+                                                    where evtname='%s';
+                                                """ % trigger_name
+            return                              self.T.pd.read_sql(qry,self.T.eng).enabled[0]
+
+        def check_function_exists(self,funct_name):
+            qry                             =   """
+                                                SELECT count(*)>0 cnt
+                                                FROM pg_proc
+                                                WHERE proname='%s';
+                                                """ % funct_name
+            return                              self.T.pd.read_sql(qry,self.T.eng).cnt[0]
+
+        def check_table_exists(self,table_name):
+            qry                             =   """
+                                                SELECT count(*)>0 cnt
+                                                FROM information_schema.tables
+                                                WHERE table_schema='public'
+                                                AND table_name='%s';
+                                                """ % table_name
+            return                              self.T.pd.read_sql(qry,self.T.eng).cnt[0]
+
+        def check_primary_key(self,table_name):
+            qry                             =   """
+                                                select relhasindex has_index
+                                                from pg_class
+                                                where relnamespace=2200
+                                                and relkind='r'
+                                                and relname=quote_ident('%s');
+                                                """ % table_name
+            x                               =   self.T.pd.read_sql(qry,self.T.eng)
+            return                              True if len(x['has_index']) and x['has_index'][0]==True else False
+
+        def make_column_primary_serial_key(self,table_name,uid_col='uid',is_new_col=True):
             """
             Usage: make_column_primary_serial_key('table_name','uid_col',is_new_col=True)
             """
-            T                           =   {'tbl'                  :   table_name,
-                                             'uid_col'              :   uid_col,
-                                             'is_new_col'           :   is_new_col}
-            cmd                         =   """select z_make_column_primary_serial_key( '%(tbl)s',
+            if not self.T.check_function_exists('z_make_column_primary_serial_key'):
+                self._parent.Create.z_make_column_primary_serial_key()
+            T                               =   {'tbl'                  :   table_name,
+                                                 'uid_col'              :   uid_col,
+                                                 'is_new_col'           :   is_new_col}
+            cmd                             =   """select z_make_column_primary_serial_key( '%(tbl)s',
                                                                                         '%(uid_col)s',
                                                                                          %(is_new_col)s );
                                             """ % T
-            self.T.conn.set_isolation_level(       0)
-            self.T.cur.execute(                    cmd)
+            self.T.conn.set_isolation_level(    0)
+            self.T.cur.execute(                 cmd)
 
         def get_geocode_info(self,addr_queries):
             addr_queries                =   addr_queries if type(addr_queries)==list else [addr_queries]
@@ -46,11 +80,10 @@ class pgSQL_Functions:
             res                         =   self.T.pd.read_sql(cmd,self.T.eng).res
             return res
 
-    class Make:
+    class Create:
 
         def __init__(self,_parent):
-            self.T                          =   _parent.T
-            self.Make                       =   self
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
 
         def z_make_column_primary_serial_key(self):
             """
@@ -63,7 +96,10 @@ class pgSQL_Functions:
 
 
             """
-            cmd=""" CREATE OR REPLACE FUNCTION z_make_column_primary_serial_key(
+            self.T.confirm_extensions()
+            cmd="""
+
+                CREATE OR REPLACE FUNCTION z_make_column_primary_serial_key(
                         table_name text,
                         col_name text,
                         new_col boolean)
@@ -138,7 +174,9 @@ class pgSQL_Functions:
                 """
             self.T.conn.set_isolation_level(       0)
             self.T.cur.execute(                    cmd)
+            self.T.z_next_free(                 )
         def z_next_free(self):
+            self.T.confirm_extensions()
             cmd="""
                 --DROP FUNCTION z_next_free(text, text, text);
 
@@ -172,7 +210,10 @@ class pgSQL_Functions:
                     except plpy.spiexceptions.UndefinedTable:
                         p = "select max(%(uid_col)s) from %(tbl)s;" % T
                         max_num = plpy.execute(p)[0]['max']
-                        T.update({'max_num':str(max_num)})
+                        if max_num:
+                            T.update({'max_num':str(max_num)})
+                        else:
+                            T.update({'max_num':str(1)})
                         p = "create sequence %(tbl)s_%(uid_col)s_seq start with %(max_num)s;" % T
                         t = plpy.execute(p)
                         p = "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T
@@ -184,9 +225,8 @@ class pgSQL_Functions:
                         stop=True
                         break
                 return T['next_val']
-
                 $BODY$
-                LANGUAGE plpythonu
+                LANGUAGE plpythonu;
             """
             self.T.conn.set_isolation_level(       0)
             self.T.cur.execute(                    cmd)
@@ -2875,63 +2915,91 @@ class pgSQL_Functions:
             self.T.cur.execute(                     cmd)
             return
 
-
 class pgSQL_Triggers:
 
     def __init__(self,_parent):
-        self.T                              =   _parent.T
-        self.Create                         =   self.Create(self)
-        self.Destroy                        =   self.Destroy(self)
-        self.Operate                        =   self.Operate(self)
+        self                                =   _parent.T.To_Sub_Classes(self,_parent)
 
     class Create:
         def __init__(self,_parent):
-            self.T                          =   _parent.T
-            self.Create                     =   self
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+
         def z_auto_add_primary_key(self):
             c                           =   """
                 DROP FUNCTION if exists z_auto_add_primary_key();
 
                 CREATE OR REPLACE FUNCTION z_auto_add_primary_key()
-                  RETURNS event_trigger AS
+                    RETURNS event_trigger AS
                 $BODY$
                 DECLARE
                     has_index boolean;
-                    tbl text;
+                    tbl_name text;
+                    primary_key_col text;
+                    missing_primary_key boolean;
+                    has_uid_col boolean;
                     _seq text;
                 BEGIN
-                    has_index = (select relhasindex from pg_class
-                            where relnamespace=2200
-                            and relkind='r'
-                            order by oid desc limit 1);
-
+                    select relhasindex,relname into has_index,tbl_name
+                        from pg_class
+                        where relnamespace=2200
+                        and relkind='r'
+                        order by oid desc limit 1;
                     IF (
                         pg_trigger_depth()=0
                         and has_index=False )
                     THEN
-                        tbl = (select relname t from pg_class
-                            where relnamespace=2200
-                            and relkind='r'
-                            order by oid desc limit 1);
-                        _seq = format('%I_uid_seq',tbl);
-                        execute format('alter table %I add column uid serial primary key',tbl);
-                        execute format('alter table %I alter column uid set default z_next_free(
-                                    ''%I'',
-                                    ''uid'',
-                                    ''%I'')',tbl,tbl,_seq);
-                    end if;
+                        --RAISE NOTICE 'NOT HAVE INDEX';
+                        EXECUTE format('SELECT a.attname
+                                        FROM   pg_index i
+                                        JOIN   pg_attribute a ON a.attrelid = i.indrelid
+                                                             AND a.attnum = ANY(i.indkey)
+                                        WHERE  i.indrelid = ''%s''::regclass
+                                        AND    i.indisprimary',tbl_name)
+                        INTO primary_key_col;
+
+                        missing_primary_key = (select primary_key_col is null);
+
+                        IF missing_primary_key=True
+                        THEN
+                            --RAISE NOTICE 'IS MISSING PRIMARY KEY';
+                            _seq = format('%I_uid_seq',tbl_name);
+                            EXECUTE format('select count(*)!=0
+                                        from INFORMATION_SCHEMA.COLUMNS
+                                        where table_name = ''%s''
+                                        and column_name = ''uid''',tbl_name)
+                            INTO has_uid_col;
+                            IF (has_uid_col=True)
+                            THEN
+                                --RAISE NOTICE 'HAS UID COL';
+                                execute format('alter table %I
+                                                    alter column uid type integer,
+                                                    alter column uid set not null,
+                                                    alter column uid set default z_next_free(
+                                                        ''%I'',
+                                                        ''uid'',
+                                                        ''%I''),
+                                                    ADD PRIMARY KEY (uid);',tbl_name,tbl_name,_seq);
+                            ELSE
+                                --RAISE NOTICE 'NOT HAVE UID COL';
+                                _seq = format('%I_uid_seq',tbl_name);
+                                execute format('alter table %I add column uid integer primary key
+                                                default z_next_free(''%I'',''uid'',''%I'')',
+                                                tbl_name,tbl_name,_seq);
+                            END IF;
+
+                        END IF;
+
+                    END IF;
+
                 END;
                 $BODY$
-                  LANGUAGE plpgsql;
-
+                    LANGUAGE plpgsql;
 
                 DROP EVENT TRIGGER if exists missing_primary_key_trigger;
-
                 CREATE EVENT TRIGGER missing_primary_key_trigger
                 ON ddl_command_end
                 WHEN TAG IN ('CREATE TABLE','CREATE TABLE AS')
                 EXECUTE PROCEDURE z_auto_add_primary_key();
-
                                                 """
             self.T.conn.set_isolation_level(           0)
             self.T.cur.execute(                        c)
@@ -2940,13 +3008,11 @@ class pgSQL_Triggers:
                 DROP FUNCTION if exists z_auto_add_last_updated_field() cascade;
 
                 CREATE OR REPLACE FUNCTION z_auto_add_last_updated_field()
-                  RETURNS event_trigger AS
+                    RETURNS event_trigger AS
                 $BODY$
                 DECLARE
                     last_table text;
                     has_last_updated boolean;
-
-
                 BEGIN
                     last_table := ( select relname from pg_class
                                     where relnamespace=2200
@@ -2959,14 +3025,34 @@ class pgSQL_Triggers:
 
                     IF (
                         pg_trigger_depth()=0
-                        and has_last_updated=False )
+                        and has_last_updated=False
+                        and position('tmp_' in last_table)=0 )
                     THEN
+                        execute format('alter table %I drop column if exists last_updated',last_table);
                         execute format('alter table %I add column last_updated timestamp with time zone',last_table);
-                    end if;
+                        execute format('DROP FUNCTION if exists z_auto_update_timestamp_on_%s_in_last_updated() cascade',last_table);
+                        execute format('DROP TRIGGER if exists update_timestamp_on_%s_in_last_updated ON %s',last_table,last_table);
+
+                        execute format('CREATE OR REPLACE FUNCTION z_auto_update_timestamp_on_%s_in_last_updated()'
+                                        || ' RETURNS TRIGGER AS $$'
+                                        || ' BEGIN'
+                                        || '     NEW.last_updated := now();'
+                                        || '     RETURN NEW;'
+                                        || ' END;'
+                                        || ' $$ language ''plpgsql'';'
+                                        || '',last_table);
+
+                        execute format('CREATE TRIGGER update_timestamp_on_%s_in_last_updated'
+                                        || ' BEFORE UPDATE OR INSERT ON %I'
+                                        || ' FOR EACH ROW'
+                                        || ' EXECUTE PROCEDURE z_auto_update_timestamp_on_%s_in_last_updated();'
+                                        || '',last_table,last_table,last_table);
+
+                    END IF;
 
                 END;
                 $BODY$
-                  LANGUAGE plpgsql;
+                    LANGUAGE plpgsql;
 
                 DROP EVENT TRIGGER if exists missing_last_updated_field;
                 CREATE EVENT TRIGGER missing_last_updated_field
@@ -3442,14 +3528,14 @@ class pgSQL_Triggers:
 
     class Destroy:
         def __init__(self,_parent):
-            self.T                          =   _parent.T
-            self.Destroy                    =   self
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+
         def z_auto_add_primary_key(self):
             c                           =   """
             DROP FUNCTION if exists
                 z_auto_add_primary_key() cascade;
 
-            DROP EVENT TRIGGER if exists missing_primary_key_trigger;
+            DROP EVENT TRIGGER if exists missing_primary_key_trigger cascade;
                                             """
             self.T.conn.set_isolation_level(0)
             self.T.cur.execute(c)
@@ -3465,16 +3551,22 @@ class pgSQL_Triggers:
 
     class Operate:
         def __init__(self,_parent):
-            self.T                              =   _parent.T
-            self.Operate                        =   self
-        def disable(self,tbl,trigger_name):
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+
+        def disable_tbl_trigger(self,tbl,trigger_name):
             cmd = "ALTER TABLE %(tbl)s DISABLE TRIGGER %(trig)s;" % {'tbl':tbl,'trig':trigger_name}
             self.T.conn.set_isolation_level(        0)
             self.T.cur.execute(                     cmd)
-        def enable(self,tbl,trigger_name):
+        def enable_tbl_trigger(self,tbl,trigger_name):
             cmd = "ALTER TABLE %(tbl)s ENABLE TRIGGER %(trig)s;" % {'tbl':tbl,'trig':trigger_name}
             self.T.conn.set_isolation_level(        0)
             self.T.cur.execute(                     cmd)
+        def disable_event_trigger(self,trigger_name):
+            cmd                             =   'ALTER EVENT TRIGGER %s DISABLE' % trigger_name
+            self.T.to_sql(                      cmd)
+        def enable_event_trigger(self,trigger_name):
+            cmd                             =   'ALTER EVENT TRIGGER %s ENABLE' % trigger_name
+            self.T.to_sql(                      cmd)
 
 class pgSQL_Tables:
     """
@@ -3487,13 +3579,11 @@ class pgSQL_Tables:
     """
 
     def __init__(self,_parent):
-        self.T                              =   _parent.T
-        self.Make                           =   self.Make(self)
-        self.Update                         =   self.Update(self)
+        self                                =   _parent.T.To_Sub_Classes(self,_parent)
 
     class Update:
         def __init__(self,_parent):
-            self.T                          =   _parent.T
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
 
         def prep_vendor_data_for_adding_geom(self,data_type,data_set,purpose,args=None):
             """
@@ -3893,10 +3983,156 @@ class pgSQL_Tables:
             """
             return
 
-    class Make:
+        class NYC:
+
+            def __init__(self,_parent):
+                self                        =   _parent.T.To_Sub_Classes(self,_parent)
+
+            def update_mvn(self):
+                pluto_file                  =   'mn_pluto'
+
+                url                         =   'https://data.cityofnewyork.us/api/views/xx67-kt59/rows.xlsx?accessType=DOWNLOAD'
+                save_path                   =   'restaurant_data.xlxs'
+                self.T.download_file(           url, save_path)
+
+                v                           =   self.T.pd.read_excel(save_path)
+
+                v.columns                   =   [ str(it).lower().strip().replace(' ','_') for it in v.columns.tolist() ]
+                m                           =   v[v.boro.str.contains('MANHATTAN')==True].copy()
+                m['inspection_date']        =   self.T.pd.to_datetime(m.inspection_date)
+
+                #  -->>  Records from "mn_vendor" are limited to the last 18 months from now.
+                back_18_months              =   self.T.dt.datetime.now() - self.T.pd.DateOffset(months=18)
+                mn_a                        =   m[m.inspection_date>back_18_months].sort('inspection_date',ascending=False).reset_index(drop=True)
+
+                z                           =   mn_a.groupby('camis')
+                grps                        =   z.groups.keys()
+                takeCols                    =   ['dba','cuisine_description','building','street','zipcode','phone',
+                                                 'inspection_date','inspection_type','grade','grade_date','record_date',
+                                                 'violation_code','violation_description'] # and 'camis' which is the grps[i]
+                mv                          =   self.T.pd.DataFrame(columns=['camis']+takeCols)
+                g_cnt                       =   len(grps)
+                for i in range(g_cnt):
+                    vend_id                 =   grps[i]
+                    x                       =   z.get_group(vend_id).reset_index(drop=True).ix[0,takeCols]
+                    x['camis']              =   vend_id
+                    mv                      =   mv.append(x)
+
+                self.T.Addr_Parsing(            self.T)
+                mv                          =   self.T.clean_street_names(mv,'dba','vend_name')
+                mv                          =   self.T.clean_street_names(mv,'street','clean_street')
+                mv['dba']                   =   mv.dba.map(lambda s: s.decode('ascii','ignore').encode('utf-8','ignore'))
+                mv['phone']                 =   mv.phone.map(lambda s: None if s.is_integer()==False else int(s))
+                mv['zipcode']               =   mv.zipcode.map(lambda s: None if s.is_integer()==False else int(s))
+
+                self.T.to_sql(                  'drop table if exists mnv_tmp')
+                mv.to_sql(                      'mnv_tmp',self.T.eng,index=False)
+
+                if not pg.Functions.Run.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                    self.T.to_sql(              """
+                                                alter table mnv_tmp add column uid serial primary key;
+                                                update mnv_tmp set uid = nextval(pg_get_serial_sequence('mnv_tmp','uid'));
+                                                """)
+
+                if not self.T.check_table_exists('mnv'):
+                    self._parent._parent.Create.NYC.mnv()
+
+                # upsert 'mnv'
+                cmd="""
+                    with upd as (
+                        update mnv m
+                        set
+                            building        = t.building,
+                            camis           = t.camis,
+                            clean_street    = t.clean_street,
+                            cuisine_description = t.cuisine_description,
+                            grade           = t.grade,
+                            grade_date      = t.grade_date,
+                            inspdate        = t.inspection_date,
+                            inspection_type = t.inspection_type,
+                            phone           = t.phone,
+                            record_date     = t.record_date,
+                            street          = t.street,
+                            vend_name       = t.vend_name,
+                            violation_code  = t.violation_code,
+                            violation_description = t.violation_description,
+                            zipcode         = t.zipcode
+                        from mnv_tmp t
+                        where
+                            m.camis         = t.camis
+                            and m.inspdate  = t.inspection_date
+                            and m.record_date = t.record_date
+                        returning t.uid uid
+                    )
+                    insert into mnv (
+                        building,
+                        camis,
+                        clean_street,
+                        cuisine_description,
+                        dba,
+                        grade,
+                        grade_date,
+                        inspdate,
+                        inspection_type,
+                        phone,
+                        record_date,
+                        street,
+                        vend_name,
+                        violation_code,
+                        violation_description,
+                        zipcode
+                    )
+                    select
+                        t.building,
+                        t.camis,
+                        t.clean_street,
+                        t.cuisine_description,
+                        t.dba,
+                        t.grade,
+                        t.grade_date,
+                        t.inspection_date,
+                        t.inspection_type,
+                        t.phone,
+                        t.record_date,
+                        t.street,
+                        t.vend_name,
+                        t.violation_code,
+                        t.violation_description,
+                        t.zipcode
+                    from
+                        mnv_tmp t,
+                        (select array_agg(f.uid) upd_recs from upd f) as f1
+                        where (not upd_recs && array[t.uid]
+                                or upd_recs is null);
+
+                    drop table mnv_tmp;
+                """
+                self.T.to_sql(                  cmd)
+
+    class Create:
 
         def __init__(self,_parent):
-            self.T                          =   _parent.T
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+
+        def confirm_extensions(self):
+            qry =   """
+                    CREATE EXTENSION IF NOT EXISTS plpythonu;
+                    --CREATE EXTENSION IF NOT EXISTS pllua;
+                    --CREATE EXTENSION IF NOT EXISTS plpgsql;
+                    CREATE EXTENSION IF NOT EXISTS postgis;
+                    --CREATE EXTENSION IF NOT EXISTS postgis_topology;
+                    --CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
+                    --CREATE EXTENSION IF NOT EXISTS pgrouting;
+                    """
+            self.T.to_sql(qry)
+            idx_trig = raw_input('add trigger to automatically create column "uid" as index col if table created without index column? (y/n)')
+            if idx_trig=='y':
+                self._parent._parent.Triggers.Create.z_auto_add_primary_key()
+            modified_trig = raw_input('add trigger to automatically create column "last_updated" for all new tables and update col/row when row modified? (y/n)')
+            if modified_trig=='y':
+                self._parent._parent.Triggers.Create.z_auto_add_last_updated_field()
+                self._parent._parent.Triggers.Create.z_auto_update_timestamp()
+            return
 
         def scrape_lattice(self,pt_buff_in_miles,lattice_table_name):
             meters_in_one_mile              =   1609.34
@@ -3927,11 +4163,11 @@ class pgSQL_Tables:
             # set starting point
             lat_d                           =   lat_mid_distances[0]
             lon_d                           =   lon_mid_distances[0]
-            T                               =   {   'latt_tbl'          :   lattice_table_name,
+            self.T.update(                      {   'latt_tbl'          :   lattice_table_name,
                                                     'X'                 :   str(lon_min),
                                                     'Y'                 :   str(lat_min),
                                                     'sw_dist'           :   str(np.sqrt(lat_d**2 + lon_d**2)),
-                                                    'sw_rad'            :   str(225)   }
+                                                    'sw_rad'            :   str(225)   } )
             cmd                             =   """
                                                     select
                                                         st_x(sw_geom::geometry(Point,4326))  min_x,
@@ -3942,7 +4178,7 @@ class pgSQL_Tables:
                                                                         %(sw_dist)s,
                                                                         radians(%(sw_rad)s)) sw_geom) as foo;
 
-                                                """ % T
+                                                """ % self.T
             min_x,min_y                     =   self.T.pd.read_sql(cmd,self.T.eng).ix[0,['min_x','min_y']]
 
             # create lattice table
@@ -3967,7 +4203,7 @@ class pgSQL_Tables:
                                                     UPDATE %(latt_tbl)s
                                                     SET gid = nextval(pg_get_serial_sequence('%(latt_tbl)s','gid'));
 
-                                                """ % T )
+                                                """ % self.T )
 
 
 
@@ -3977,7 +4213,7 @@ class pgSQL_Tables:
                 lat_d                       =   lat_mid_distances[i]
                 for j in range(0,lon_segs):
                     lon_d                   =   lon_mid_distances[j]
-                    T                       =   {   'table_name'        :lattice_table_name,
+                    self.T.update(              {   'table_name'        :lattice_table_name,
                                                     'X'                 :str(min_x),
                                                     'Y'                 :str(min_y),
                                                     'n_dist'            :str(lat_d),
@@ -3985,7 +4221,7 @@ class pgSQL_Tables:
                                                     'e_dist'            :str(lon_d),
                                                     'n_rad'             :str(0),
                                                     'ne_rad'            :str(45),
-                                                    'e_rad'             :str(90)   }
+                                                    'e_rad'             :str(90)   } )
                     # (lat_min,lon_min) is southwest most point
                     # lattice created by moving northeast
 
@@ -4008,16 +4244,16 @@ class pgSQL_Tables:
                                                                         %(e_dist)s,
                                                                         radians(%(e_rad)s)) e_geom) as foo2;
 
-                                                """.replace('\n','')%T
+                                                """.replace('\n','') % self.T
                     self.T.conn.set_isolation_level(   0)
                     self.T.cur.execute(                cmd)
 
-            T                               =   {  'latt_tbl'           :   lattice_table_name,
+            self.T.update(                      {  'latt_tbl'           :   lattice_table_name,
                                                    'tmp_tbl'            :   'tmp_'+INSTANCE_GUID,
                                                    'tmp_tbl_2'          :   'tmp_'+INSTANCE_GUID+'_2',
                                                    'tmp_tbl_3'          :   'tmp_'+INSTANCE_GUID+'_3',
                                                    'buf_rad'            :   str(int((pt_buff_in_miles *
-                                                                              meters_in_one_mile)/2.0))}
+                                                                              meters_in_one_mile)/2.0))} )
 
             self.T.conn.set_isolation_level(           0)
             self.T.cur.execute(                        """
@@ -4114,19 +4350,19 @@ class pgSQL_Tables:
 
 
 
-                                                """ % T )
+                                                """ % self.T )
 
 
-            T.update(                           { 'latt_tbl'            :   lattice_table_name,})
+            self.T.update(                      { 'latt_tbl'            :   lattice_table_name,})
 
             # PROVE THAT ALL ADDRESSES ARE UNIQUE ( assuming no two addresses have the same BBL )
-            assert True                    ==   self.T.pd.read_sql(""" select all_bbl=uniq_bbl _bool
-                                                                from
-                                                                    (select count(distinct y1.bbl) uniq_bbl
-                                                                        from %(latt_tbl)s y1) as f1,
-                                                                    (select count(y2.bbl) all_bbl
-                                                                        from %(latt_tbl)s y2) as f2
-                                                            """ % T,self.T.eng)._bool[0]
+            assert True                    ==   self.T.pd.read_sql("""  select all_bbl=uniq_bbl _bool
+                                                                        from
+                                                                            (select count(distinct y1.bbl) uniq_bbl
+                                                                                from %(latt_tbl)s y1) as f1,
+                                                                            (select count(y2.bbl) all_bbl
+                                                                                from %(latt_tbl)s y2) as f2
+                                                                    """ % self.T,self.T.eng)._bool[0]
 
         def usps_table(self):
             self.T.py_path.append(                        self.T.os_environ['BD'] + '/geolocation/USPS')
@@ -4625,7 +4861,7 @@ class pgSQL_Tables:
         class NYC:
 
             def __init__(self,_parent):
-                self.T                          =   _parent.T
+                self                        =   _parent.T.To_Sub_Classes(self,_parent)
 
             def snd(self,table_name='snd',drop_prev=True):
                 from f_nyc_data import load_parsed_snd_datafile_into_db
@@ -6031,25 +6267,642 @@ class pgSQL_Tables:
                         or max_num is null)
                 """
 
+            def pluto(self):
+                from f_nyc_data                 import NYC_Data
+                ND                          =   NYC_Data()
+                df                          =   ND.get_latest_links_from_nyc_bytes()
+
+                import re
+                shape_files                 =   df[(df.Data_Set.str.contains('mappluto',flags=re.I)) & (df.file_type=='zip')]
+                link                        =   shape_files[shape_files.link.str.contains('mn_')].link.iloc[0]
+
+                save_dir                    =   'NYC_data/'
+                save_path                   =   save_dir + '2015.06.01_mn_shape_file.zip'
+                assert self.T.download_file(link, save_path)==True
+
+                import zipfile
+                z                           =   zipfile.ZipFile(save_path)
+                z.extractall(                   )
+                zip_dir                     =   z.filelist[0].filename[:z.filelist[0].filename.find('/')]
+
+                import getpass
+                sql_file                    =   save_dir + 'mn_pluto.sql'
+                log_f                       =   save_dir + 'shp_import.log'
+                pw                          =   getpass.getpass('root password?\t')
+                tbl_name                    =   'mn_pluto'
+                print 'Using title "%s" for pluto table.' % tbl_name
+
+                from subprocess                 import Popen            as sub_popen
+                from subprocess                 import PIPE             as sub_PIPE
+
+                cmds                        =   ['echo "ALTER EVENT TRIGGER missing_primary_key_trigger DISABLE;" > %s' % sql_file,
+                                                 'shp2pgsql -s 2263:4326 Manhattan/MNMapPLUTO.shp %s >> %s 2> %s' % (tbl_name,sql_file,log_f),
+                                                 'echo "ALTER EVENT TRIGGER missing_primary_key_trigger ENABLE;" >> %s' % sql_file,
+                                                 ' '.join(['echo "%s" |' % pw,
+                                                           'sudo -S --prompt=\'\' su postgres -c',
+                                                           '"psql -h %(DB_HOST)s -p %(DB_PORT)s %(DB_NAME)s' % self.T,
+                                                           '< %s" 2>&1 > %s 2>&1' % (sql_file,log_f)])
+                                                ]
+                (_out,_err)                 =   sub_popen('; '.join(cmds),stdout=sub_PIPE,shell=True).communicate()
+                assert not _out1
+                assert _err1 is None
+                clean_up=raw_input('remove all files (INCLUDING LOG: %s) that were created for this function? (y/n)\t' % log_f)
+                if clean_up=='y':
+                    cmds                    =   ['rm -fr %s' % save_dir,
+                                                 'rm -fr %s' % zip_dir]
+                    (_out,_err)             =   sub_popen('; '.join(cmds),stdout=sub_PIPE,shell=True).communicate()
+                    assert not _out
+                    assert _err is None
+                return
+
+            def mnv(self):
+                qry = """
+                    CREATE TABLE IF NOT EXISTS mnv (
+                        building text,
+                        camis bigint,
+                        vend_name text,
+                        clean_street text,
+                        cuisinecode bigint,
+                        dba text,
+                        inspdate timestamp without time zone,
+                        street text,
+                        id integer,
+                        recog_street boolean,
+                        recog_addr boolean DEFAULT false,
+                        bbl integer,
+                        phone bigint,
+                        norm_addr text,
+                        seamless_id bigint,
+                        yelp_id text,
+                        address text,
+                        geom geometry(Point,4326),
+                        lot_cnt integer DEFAULT 1,
+                        zipcode integer,
+                        cuisine_description text,
+                        grade text,
+                        grade_date timestamp with time zone,
+                        inspection_type text,
+                        record_date timestamp with time zone,
+                        violation_code text,
+                        violation_description text
+                    );
+                """
+                self.T.to_sql(                  qry)
+                if not self.T.check_primary_key('mnv'):
+                    self.T.make_column_primary_serial_key('mnv','uid')
+
+            def turnstile_data(self):
+                # Add subway entrances to map
+                url                         =   'http://web.mta.info/developers/data/nyct/subway/StationEntrances.csv'
+                s                           =   self.T.pd.read_csv(url)
+                s.columns                   =   [it.lower().strip() for it in s.columns.tolist()]
+                self.T.to_sql(                  'drop table if exists sub_stat_entr')
+                s.to_sql(                       'sub_stat_entr',self.T.eng)
+
+                if not pg.Functions.Run.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                    self.T.to_sql(              """
+                                                alter table sub_stat_entr add column uid serial primary key;
+                                                update sub_stat_entr set uid = nextval(pg_get_serial_sequence('sub_stat_entr','uid'));
+                                                """)
+
+                self.T.to_sql(                  'alter table sub_stat_entr add column geom geometry(Point,4326)')
+                self.T.to_sql(                  "UPDATE sub_stat_entr set geom = ST_SetSRID(ST_MakePoint(station_longitude,station_latitude),4326)")
+
+                if not self.T.check_table_exists(pluto_file):
+                    print 'This function depends on NYC tax lot geometries (MapPLUTO) being available in pgSQL.'
+                    print 'Currently this is looking for table "%s"' % pluto_file
+                    print 'If no pluto table exists, run "import f_postgres as PG; pg=PG.pgSQL(); pg.Create.NYC.pluto();"'
+                    print 'Else, consider changing the target table variable at the top of this function'
+
+                self.T.to_sql(                  """ DELETE FROM sub_stat_entr
+                                                    WHERE NOT (geom && (
+                                                        SELECT ST_Buffer(ST_ConvexHull((ST_Collect(f.the_geom))), .0005) as geom
+                                                        FROM ( SELECT *, (ST_Dump(geom)).geom As the_geom
+                                                        FROM %s) As f))""" % pluto_file)
+
+
+                # Add subway stops to map; add turn stile data to subway stops
+
+                import zipfile, StringIO
+                r                           =   self.T.requests.get('http://web.mta.info/developers/data/nyct/subway/google_transit.zip')
+                z                           =   zipfile.ZipFile(StringIO.StringIO(r.content))
+                sub_stops                   =   self.T.pd.read_csv(z.open('stops.txt'))
+                self.T.to_sql(                  'drop table if exists sub_stops;')
+                sub_stops.to_sql(               'sub_stops',self.T.eng)
+
+                if not pg.Functions.Run.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                    self.T.to_sql(              """
+                                                alter table sub_stops add column uid serial primary key;
+                                                update sub_stops set uid = nextval(pg_get_serial_sequence('sub_stops','uid'));
+                                                """)
+
+                self.T.to_sql(                  "alter table sub_stops add column geom geometry(Point,4326)")
+                self.T.to_sql(                  "UPDATE sub_stops set geom = ST_SetSRID(ST_MakePoint(stop_lon,stop_lat),4326)")
+                self.T.to_sql(                  """ DELETE FROM sub_stops
+                                                    WHERE NOT (geom && (
+                                                        SELECT ST_Buffer(ST_ConvexHull((ST_Collect(f.the_geom))), .0005) as geom
+                                                        FROM ( SELECT *, (ST_Dump(geom)).geom As the_geom
+                                                        FROM %s) As f))""" % pluto_file)
+
+                # Add turn stile key/legend to pgsql
+
+                ts_key                      =   self.T.pd.read_excel('http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls')
+                ts_key.columns              =   [str(it).lower().replace(' ','_') for it in ts_key.columns.tolist()]
+                ts_key['line_name']         =   ts_key['line_name'].map(lambda s: ''.join(sorted([str(it) for it in s])) if type(s)!=int else str(s))
+                ts_key['clean']             =   ts_key.station.map(lambda s: s.lower())
+                self.T.to_sql(                  "drop table if exists ts_key")
+                ts_key.to_sql(                  'ts_key',self.T.eng,index=False)
+
+                # Add turn stile data to pgsql
+                # General Source for Turn Stiles: http://web.mta.info/developers/turnstile.html
+                #     - field description: http://web.mta.info/developers/resources/nyct/turnstile/ts_Field%20Description.txt
+                #     - data key: http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls
+                #         --> this is the provides the Remote Unit/Control Area/Station Name Key
+                # Need coords for "UNIT"
+                # Remote and Station Name here:
+                #      'http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls'
+                # Station Names and Coords here:
+                #      'http://web.mta.info/developers/data/nyct/subway/StationEntrances.csv'
+                #     - Relevant stations were added to pgsql as 'sub_stat_entr'
+
+
+                cols                        =   ['C/A','UNIT','SCP','DATE1','TIME1','DESC1','ENTRIES1','EXITS1',
+                                                 'DATE2','TIME2','DESC2','ENTRIES2','EXITS2','DATE3','TIME3','DESC3','ENTRIES3',
+                                                 'EXITS3','DATE4','TIME4','DESC4','ENTRIES4','EXITS4','DATE5','TIME5','DESC5',
+                                                 'ENTRIES5','EXITS5','DATE6','TIME6','DESC6','ENTRIES6',
+                                                 'EXITS6','DATE7','TIME7','DESC7','ENTRIES7','EXITS7','DATE8',
+                                                 'TIME8','DESC8','ENTRIES8','EXITS8']
+                cols                        =   [str(it).lower().replace('/','_') for it in cols]
+                url                         =   'http://web.mta.info/developers/data/nyct/turnstile/turnstile_141004.txt'
+                p                           =   self.T.pd.read_csv(url,names=cols)
+                idx                         =   p[p.unit.str.contains('R')==False].index
+                p                           =   p.drop(idx,axis=0).reset_index(drop=True)
+
+                dropCols = []
+                for it in cols:
+                    if it.find('exit')==0 or it.find('entries')==0:
+                        p[it]               =   p[it].map(float)
+                    if it.find('date')==0:
+                        date_pt,time_pt,datetime_pt = it,'time'+it[4:],'datetime'+it[4:]
+                        p[datetime_pt]      =   self.T.pd.to_datetime(p[date_pt] + ' ' + p[time_pt],format='%m-%d-%y %H:%M:%S',coerce=False)
+                        p[datetime_pt]      =   p[datetime_pt].map(lambda s: None if str(s)=='NaT' else str(s))
+                        dropCols.extend(        [date_pt,time_pt])
+                p                           =   p.drop(dropCols,axis=1)
+                cols                        =   p.columns.tolist()
+
+                # END GOAL conform 'station_names' to 'mn_stations'
+                mn_stations                 =   self.T.pd.read_sql("""select * from sub_stat_entr""",self.T.eng)
+
+                # Limit NYC key to MN
+                mn_div_list                 =   mn_stations.division.unique().tolist()
+                ts_key                      =   ts_key.drop(ts_key[ts_key.division.isin(mn_div_list)==False].index,axis=0)
+
+                # Create and Sort Route List for each station
+                mn_cols                     =   mn_stations.columns.tolist()
+                s_pt,e_pt                   =   mn_cols.index('route_1'),mn_cols.index('route_11')+1
+                mn_stations['all_lines']    =   mn_stations.ix[:,s_pt:e_pt].apply(lambda s: ''.join([str(it) for it in s if str(it)!='NaN']).replace('nan','').replace('.0',''),axis=1)
+                mn_stations['all_lines']    =   mn_stations.all_lines.map(lambda s: ''.join(sorted(s)))
+                # ts_key['line_name']       =   ts_key['line_name'].map(lambda s: ''.join(sorted([str(it) for it in s])) if type(s)!=int else str(s))
+
+                # clean up many but small differences between station names
+                mn_stations['clean']        =   mn_stations.station_name.map(lambda s: s.lower())
+                # ts_key['clean']           =   ts_key.station.map(lambda s: s.lower())
+                repl_dict                   =   {   r'(1st|first)'          :r'1',
+                                                    r'(2nd|second)'         :r'2',
+                                                    r'(3rd|third)'          :r'3',
+                                                    r'(4th|fourth)'         :r'4',
+                                                    r'(5th|fifth)'          :r'5',
+                                                    r'(6th|sixth)'          :r'6',
+                                                    r'(7th|seventh)'        :r'7',
+                                                    r'(8th|eigth)'          :r'8',
+                                                    r'(9th|nineth|ninth)'   :r'9',
+                                                    r'(0th)'                :r'0',
+                                                    r'(1th)'                :r'1',
+                                                    r'(2th)'                :r'2',
+                                                    r'(3th)'                :r'3',
+                                                    r'\s(street)'           :r' st',
+                                                    r'\s(square)'           :r' sq',
+                                                    r'\s(center)'           :r' ctr',
+                                                    r'\s(av)'               :r' ave'}
+                for k,v in repl_dict.iteritems():
+                    mn_stations['clean']    =   mn_stations.clean.str.replace(k,v)
+
+                repl_dict                   =   {   r'\Aunion sq':r'14 st-union sq',
+                                                    r'cathedral parkway-110 st':r'110 st-cathedrl',
+                                                    r'163 st - amsterdam ave':r'163 st-amsterdm',
+                                                    r'81 st - museum of natural history':r'81 st-museum',
+                                                    r'47-50 sts rockefeller ctr':r'47-50 st-rock',
+                                                    r'137 st-city college':r'137 st-city col',
+                                                    r'broadway-lafayette st':r'broadway/lafay',
+                                                    r'west 4 st':r'w 4 st-wash sq' ,
+                                                    r'110 st-central park north':r'110 st-cpn',
+                                                    r'116 st-columbia university':r'116 st-columbia',
+                                                    r'168 st - washington heights':r'168 st-broadway',
+                                                    r'49 st':r'49 st-7 ave',
+                                                    r'168 st\Z':r'168 st-broadway',
+                                                    r'59 st-columbus circle':r'59 st-columbus',
+                                                    r'66 st-lincoln ctr':r'66 st-lincoln',
+                                                    r'68 st-hunter college':r'68st-hunter col',
+                                                    # r'astor pl':'astor place',
+                                                    r'brooklyn bridge-city hall':r'brooklyn bridge',
+                                                    r'dyckman st-200 st':r'dyckman-200 st',
+                                                    r'grand central-42 st':r'42 st-grd cntrl',
+                                                    r'inwood - 207 st':r'inwood-207 st',
+                                                    r'lexington av-53 st':r'lexington-53 st',
+                                                    r'prince st':r"prince st-b'way",
+                                                    r'\Atimes sq\Z':r'42 st-times sq',
+                                                    r'times sq-42 st':r'42 st-times sq',
+                                                    r'van cortlandt park-242 st':r'242 st',
+                                                    r'marble hill-225 st':r'225 st',
+                                                    r'lexington ave-53 st':r'lexington-53 st',
+                                                    r'harlem-148 st':r'148 st-lenox',
+                                                    r'\Agrand central\Z':r'42 st-grd cntrl',
+                                                    r'\Acanal st (ul)\Z':r'canal st',}
+                for k,v in repl_dict.iteritems():
+                    mn_stations['clean']    =   mn_stations.clean.str.replace(k,v)
+
+                station_names               =   ts_key.clean.tolist()
+                #print len(mn_stations[mn_stations.clean.isin(station_names)==False]), 'stations not mapped'
+                # mn_stations[mn_stations.clean.isin(station_names)==False].ix[:,['division','line','station_name','all_lines','clean']].sort('clean')
+                # mn_stations.head()
+
+                # push to [ sub_stat_entr,ts_key,p(turn stiles) ] to pgsql for comparison and unificiation
+                self.T.to_sql(                  ';'.join(['drop table if exists sub_stat_entr cascade',
+                                                          'drop table if exists ts_key',
+                                                          'drop table if exists sub_turn_stiles']) )
+                self.T.delay(                   1)
+
+                mn_stations.to_sql(             'sub_stat_entr',self.T.eng)
+                self.T.to_sql(                  "UPDATE sub_stat_entr set geom = ST_SetSRID(ST_MakePoint(station_longitude,station_latitude),4326)")
+
+                ts_key.to_sql(                  'ts_key',self.T.eng)
+                self.T.to_sql(                  """
+                                                alter table ts_key add column lat double precision;
+                                                alter table ts_key add column lon double precision;
+                                                """)
+
+                p.to_sql(                       'sub_turn_stiles',self.T.eng)
+                self.T.to_sql(                  """
+                                                alter table sub_turn_stiles add column station text;
+                                                alter table sub_turn_stiles add column lat double precision;
+                                                alter table sub_turn_stiles add column lon double precision;
+                                                """)
+
+
+                # 1. Copy coords from station_entrances to turnstile_key
+                self.T.to_sql(                  """
+                                                UPDATE ts_key t
+                                                SET lat = s.station_latitude,lon = s.station_longitude
+                                                FROM sub_stat_entr s
+                                                WHERE s.clean=t.clean
+                                                AND s.all_lines=t.line_name;
+                                                """)
+                #print pd.read_sql('select count(*) c from ts_key where lon is null',engine).c[0],'null'
+                #print pd.read_sql('select count(*) c from ts_key where lon is not null',engine).c[0],'not null'
+
+                # 2. Copy matching ts_key table data to turn_stiles table
+                self.T.to_sql(                  """
+                                                UPDATE sub_turn_stiles
+                                                SET lat = t.lat,lon=t.lon,station=t.station
+                                                FROM ts_key t
+                                                WHERE t.remote = unit
+                                                AND t.booth = c_a;
+                                                """)
+                self.T.to_sql(                  'alter table sub_turn_stiles add column geom geometry(Point,4326)')
+                self.T.to_sql(                  "UPDATE sub_turn_stiles set geom = ST_SetSRID(ST_MakePoint(lon,lat),4326)")
+
+                # 3. Attempt to match leftovers (non-matching) b/t ts_key/sub_stat_entr using wildcards
+                leftovers                   =   self.T.pd.read_sql("select * from ts_key where lon is null and division = any(array['IRT','IND','BMT'])",self.T.eng)
+                for i in range(0,len(leftovers)):
+                    row                     =   leftovers.ix[i,:]
+                    chk                     =   row['clean'].find('-')
+                    if chk != -1:
+                        a,b                 =   '%%'+str(row['clean'].split('-')[0])+'%%',row['line_name']
+                        tmp                 =   self.T.pd.read_sql(  """
+                                                    SELECT station_latitude lat,station_longitude lon
+                                                    FROM sub_stat_entr s
+                                                    WHERE s.clean ilike '%s'
+                                                    AND s.all_lines='%s';
+                                                    """%(a,b),self.T.eng)
+                        if (len(tmp.lat.unique())==len(tmp.lat.unique())==1):
+                            a,b,c           =   tmp.lat[0],tmp.lon[0],row['id']
+                            self.T.to_sql(      """
+                                                UPDATE ts_key set lat=%f,lon=%f
+                                                WHERE uid = %d
+                                                """%(a,b,c),self.T.eng)
+
+                # 4. Attempt to match leftover by:
+                        # starting with lines,division,
+                            # if one result, make match;
+                            # else if only one result and it's a partial match, match it?
+                leftovers                   =   self.T.pd.read_sql("select * from ts_key where lon is null and division = any(array['IRT','IND','BMT'])",self.T.eng)
+                for i in range(0,len(leftovers)):
+                    row                     =   leftovers.ix[i,:]
+                    a,b,c                   =   '%%'+str(row['clean'].split('-')[0])+'%%',row['line_name'],row['division']
+                    tmp                     =   pd.read_sql(  """
+                                                    SELECT station_latitude lat,station_longitude lon,clean
+                                                    FROM sub_stat_entr s
+                                                    WHERE s.division='%s'
+                                                    AND s.all_lines='%s';
+                                                    """%(c,b),self.T.eng)
+                    if (len(tmp.lat.unique())==len(tmp.lat.unique())==1):
+                        a,b,c               =   tmp.lat[0],tmp.lon[0],row['uid']
+                        self.T.to_sql(          """
+                                                    UPDATE ts_key
+                                                    SET lat=%f,lon=%f
+                                                    WHERE uid = %d
+                                                """%(a,b,c))
+                    else:
+                        z                   =   tmp[tmp.clean.str.contains(a)]
+                        if (len(z.lat.unique())==len(z.lat.unique())==1):
+                            a,b,c           =   tmp.lat[0],tmp.lon[0],row['uid']
+                            self.T.to_sql(      """
+                                                    UPDATE ts_key
+                                                    SET lat=%f,lon=%f
+                                                    WHERE uid = %d
+                                                """%(a,b,c))
+
+                # TURN STILE CONT'D convert text to timestamp
+
+                self.T.to_sql("""
+
+                    DROP TABLE if exists tmp;
+
+                    CREATE TABLE tmp (
+                        gid serial primary key,
+                        datetime1 timestamp with time zone,
+                        datetime2 timestamp with time zone,
+                        datetime3 timestamp with time zone,
+                        datetime4 timestamp with time zone,
+                        datetime5 timestamp with time zone,
+                        datetime6 timestamp with time zone,
+                        datetime7 timestamp with time zone,
+                        datetime8 timestamp with time zone
+                        );
+
+                    UPDATE tmp SET gid = nextval(pg_get_serial_sequence('tmp','gid'));
+
+                    INSERT INTO tmp (
+                        datetime1,
+                        datetime2,
+                        datetime3,
+                        datetime4,
+                        datetime5,
+                        datetime6,
+                        datetime7,
+                        datetime8)
+                    SELECT
+                        to_timestamp(s.datetime1,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime2,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime3,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime4,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime5,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime6,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime7,'YYYY-MM-DD HH24:MI:SS'),
+                        to_timestamp(s.datetime8,'YYYY-MM-DD HH24:MI:SS')
+                    FROM sub_turn_stiles s;
+
+                    ALTER TABLE sub_turn_stiles
+                    DROP COLUMN datetime1,
+                    DROP COLUMN datetime2,
+                    DROP COLUMN datetime3,
+                    DROP COLUMN datetime4,
+                    DROP COLUMN datetime5,
+                    DROP COLUMN datetime6,
+                    DROP COLUMN datetime7,
+                    DROP COLUMN datetime8,
+                    ADD COLUMN datetime1 timestamp with time zone,
+                    ADD COLUMN datetime2 timestamp with time zone,
+                    ADD COLUMN datetime3 timestamp with time zone,
+                    ADD COLUMN datetime4 timestamp with time zone,
+                    ADD COLUMN datetime5 timestamp with time zone,
+                    ADD COLUMN datetime6 timestamp with time zone,
+                    ADD COLUMN datetime7 timestamp with time zone,
+                    ADD COLUMN datetime8 timestamp with time zone;
+
+                    UPDATE sub_turn_stiles s
+                    SET
+                        datetime1 = t.datetime1,
+                        datetime2 = t.datetime2,
+                        datetime3 = t.datetime3,
+                        datetime4 = t.datetime4,
+                        datetime5 = t.datetime5,
+                        datetime6 = t.datetime6,
+                        datetime7 = t.datetime7,
+                        datetime8 = t.datetime8
+                    FROM tmp t
+                    where t.gid = s.uid;
+
+                               """)
+
+                # TURN STILE CONT'D calc. register differences
+                self.T.to_sql("""
+                    alter table sub_turn_stiles
+                    add column out1 double precision,
+                    add column out2 double precision,
+                    add column out3 double precision,
+                    add column out4 double precision,
+                    add column out5 double precision,
+                    add column out6 double precision,
+                    add column out7 double precision,
+                    add column in1 double precision,
+                    add column in2 double precision,
+                    add column in3 double precision,
+                    add column in4 double precision,
+                    add column in5 double precision,
+                    add column in6 double precision,
+                    add column in7 double precision;
+
+
+                    update sub_turn_stiles
+                    set out1 = exits2-exits1
+                    where exits1 != 'NaN'::float
+                    and exits2 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set out2 = exits3-exits2
+                    where exits2 != 'NaN'::float
+                    and exits3 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set out3 = exits4-exits3
+                    where exits3 != 'NaN'::float
+                    and exits4 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set out4 = exits5-exits4
+                    where exits4 != 'NaN'::float
+                    and exits5 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set out5 = exits6-exits5
+                    where exits5 != 'NaN'::float
+                    and exits6 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set out6 = exits7-exits6
+                    where exits6 != 'NaN'::float
+                    and exits7 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set out7 = exits8-exits7
+                    where exits7 != 'NaN'::float
+                    and exits8 != 'NaN'::float;
+
+
+                    update sub_turn_stiles
+                    set in1 = entries2-entries1
+                    where entries1 != 'NaN'::float
+                    and entries2 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set in2 = entries3-entries2
+                    where entries2 != 'NaN'::float
+                    and entries3 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set in3 = entries4-entries3
+                    where entries3 != 'NaN'::float
+                    and entries4 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set in4 = entries5-entries4
+                    where entries4 != 'NaN'::float
+                    and entries5 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set in5 = entries6-entries5
+                    where entries5 != 'NaN'::float
+                    and entries6 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set in6 = entries7-entries6
+                    where entries6 != 'NaN'::float
+                    and entries7 != 'NaN'::float;
+
+                    update sub_turn_stiles
+                    set in7 = entries8-entries7
+                    where entries7 != 'NaN'::float
+                    and entries8 != 'NaN'::float;
+
+
+                    alter table sub_turn_stiles
+                        add column in_all double precision,
+                        add column out_all double precision;
+                    update sub_turn_stiles
+                    set in_all = (select sum(s) from unnest(array[in1,in2,in3,in4,in5,in6,in7]) s);
+                    update sub_turn_stiles
+                    set out_all = (select sum(s) from unnest(array[out1,out2,out3,out4,out5,out6,out7]) s);
+                """)
+
+                # NEED to consolidate turn_stile data
+
+                # turn_stile data with missing station name -- SMALL ADJUSTMENTS NEEDED
+                cmd                         =   """ select distinct unit,c_a from sub_turn_stiles
+                                                    where station is null order by unit;"""
+                self.T.pd.read_sql(             cmd,self.T.eng)
+
+                # turn_stile data analysis:
+
+                # general data used herein
+                datetime_cols               =   ['datetime'+str(i) for i in range(1,9)]
+                desc_cols                   =   ['desc'+str(i) for i in range(1,9)]
+                entry_cols                  =   ['entries'+str(i) for i in range(1,9)]
+                exit_cols                   =   ['exits'+str(i) for i in range(1,9)]
+                in_cols                     =   ['in'+str(i) for i in range(1,9)]
+                out_cols                    =   ['out'+str(i) for i in range(1,9)]
+                agg_cols                    =   ['in_all','out_all']
+                other_cols                  =   ['index','lat','lon','uid','geom']
+
+                # 1. this shows there are multiple entries per station, i.e., multiple turn stiles
+                cmd                         =   """
+                                                select * from sub_turn_stiles
+                                                where out_all is not null
+                                                and station = '34 ST-HERALD SQ'
+                                                AND extract(hour from datetime1) = 4
+                                                AND extract(day from datetime1) = 29
+                                                order by out_all desc;
+                                                """
+
+                # 2. this shows there are multiple rows even when {c_a,unit,scp,datetime1} are same
+                cmd                         =   """
+                                                select * from sub_turn_stiles
+                                                where out_all is not null
+                                                and station = '34 ST-HERALD SQ'
+                                                AND scp = '00-00-00'
+                                                order by c_a,unit,datetime1 asc;
+                                                """
+
+                # 3. this shows the door is open for people leaving during rush hour... (see datetime6-7)
+                #        and possibly explains why multiple rows
+                cmd                         =   """
+                                                select * from sub_turn_stiles
+                                                where out_all is not null
+                                                and station = '34 ST-HERALD SQ'
+                                                AND scp = '00-00-00'
+                                                AND datetime1 = '2014-09-28 09:00:00-04:00';
+                                                """
+
+                # dropCols                  =   desc_cols + entry_cols + exit_cols + in_cols + out_cols + other_cols
+                self.T.pd.read_sql(             cmd,self.T.eng)#.drop(dropCols,axis=1)
+
+
+
 class pgSQL:
 
     def __init__(self):
+        def download_file(url,save_path):
+            import os
+            _dir = save_path[:save_path.rfind('/')]
+            if not os.path.exists(_dir):
+                os.makedirs(_dir)
+
+            with open(save_path, 'wb') as handle:
+                response = self.T.requests.get( url, stream=True)
+
+                if not response.ok:
+                    # Something went wrong
+                    print 'error'
+
+                for block in response.iter_content(1024):
+                    if not block:
+                        break
+
+                    handle.write(block)
+                    handle.flush()
+            return True
+
+        def read_json_from_url_response(url):
+            r = self.T.requests.get(url)
+            assert r.status_code=='200'
+            # print r.text
+            g = r.text
+            g = g.replace('true',"'true'")
+            a = eval(g)
+            return a
+
+        def to_sql(cmd):
+            self.T.conn.set_isolation_level(    0)
+            self.T.cur.execute(                 cmd)
+
+
         import                                  datetime                as dt
-        from time                           import sleep
-        from urllib                         import quote_plus,unquote
-        from re                             import findall              as re_findall
-        from re                             import sub                  as re_sub           # re_sub('patt','repl','str','cnt')
-        from re                             import search               as re_search        # re_search('patt','str')
-        from subprocess                     import Popen                as sub_popen
-        from subprocess                     import PIPE                 as sub_PIPE
-        from traceback                      import format_exc           as tb_format_exc
-        from sys                            import exc_info             as sys_exc_info
-        from types                          import NoneType
-        from time                           import sleep                as delay
-        from uuid                           import uuid4                as get_guid
-        from f_geolocation                  import Addr_Parsing,Geocoding
-        from routing_settings               import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
-        from py_classes                     import To_Class
+        from time                               import sleep
+        from urllib                             import quote_plus,unquote
+        from re                                 import findall          as re_findall
+        from re                                 import sub              as re_sub           # re_sub('patt','repl','str','cnt')
+        from re                                 import search           as re_search        # re_search('patt','str')
+        from subprocess                         import Popen            as sub_popen
+        from subprocess                         import PIPE             as sub_PIPE
+        from traceback                          import format_exc       as tb_format_exc
+        from sys                                import exc_info         as sys_exc_info
+        from types                              import NoneType
+        from time                               import sleep            as delay
+        from uuid                               import uuid4            as get_guid
+        import                                  requests
+        from f_geolocation                      import Addr_Parsing,Geocoding
+        from routing_settings                   import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
+        from py_classes                         import To_Class,To_Sub_Classes
         import                                  pandas                  as pd
         pd.set_option(                          'expand_frame_repr', False)
         pd.set_option(                          'display.max_columns', None)
@@ -6093,6 +6946,8 @@ class pgSQL:
         self.Functions                      =   pgSQL_Functions(self)
         self.Triggers                       =   pgSQL_Triggers(self)
         self.Tables                         =   pgSQL_Tables(self)
+
+
 
 
 
@@ -6366,7 +7221,7 @@ def add_points_to_remaining_lots(show_some_detail=True,show_steps=False):
 
         if me=='y' and lot_pts!=[]:
             c = self.T.gd.GeoDataFrame(lot_pts)
-            d = engine.execute("""
+            d = self.T.to_sql("""
                         UPDATE lot_pts
                         SET geom = the_geom
                         FROM
