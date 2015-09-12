@@ -69,7 +69,7 @@ class pgSQL_Functions:
         def confirm_extensions(self):
             qry =   """
                     CREATE EXTENSION IF NOT EXISTS plpythonu;
-                    --CREATE EXTENSION IF NOT EXISTS pllua;
+                    CREATE EXTENSION IF NOT EXISTS pllua;
                     --CREATE EXTENSION IF NOT EXISTS plpgsql;
                     CREATE EXTENSION IF NOT EXISTS postgis;
                     --CREATE EXTENSION IF NOT EXISTS postgis_topology;
@@ -1348,20 +1348,9 @@ class pgSQL_Functions:
 
 
             """
+            if not self.F.types_exists('string_dist_results'):
+                self.F.types_create_string_dist_results()
             cmd="""
-
-                DROP TYPE IF EXISTS string_dist_results cascade;
-                CREATE TYPE string_dist_results as (
-                    idx integer,
-                    orig_str text,
-                    jaro double precision,
-                    jaro_b text,
-                    leven integer,
-                    leven_b text,
-                    nysiis text,
-                    rating_codex text
-                );
-
                 DROP FUNCTION IF EXISTS     z_get_string_dist(      integer[],
                                                                     text,
                                                                     text,
@@ -1473,28 +1462,64 @@ class pgSQL_Functions:
 
 
             """
+            if not self.F.types_exists('string_dist_results'):
+                self.F.types_create_string_dist_results()
             cmd="""
-
-                DROP FUNCTION IF EXISTS     z_jellyfish(            integer[],
+                DROP FUNCTION IF EXISTS     z_jellyfish(            text,
                                                                     text,
-                                                                    text,
-                                                                    text[],
                                                                     boolean,
                                                                     boolean,
                                                                     boolean,
                                                                     boolean,
-                                                                    boolean);
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean) CASCADE;
 
-                CREATE OR REPLACE FUNCTION  z_jellyfish(            m_from_qry      text[],
-                                                                    string_set      text[],
-                                                                    compare_tbl     text,
-                                                                    compare_col     text[],
-                                                                    jaro            boolean default true,
-                                                                    leven           boolean default true,
-                                                                    nysiis          boolean default true,
-                                                                    rating_codex    boolean default true,
-                                                                    usps_repl_first boolean default true)
+                CREATE OR REPLACE FUNCTION  z_jellyfish(            from_str_idx_tuples_qry     text,                   -- having header: | from_tuples    |
+                                                                    against_str_idx_tuples_qry  text,                   -- having header: | against_tuples |
+                                                                    all_results                 boolean default false,
+                                                                    best_result                 boolean default true,
+                                                                    jaro                        boolean default true,
+                                                                    leven                       boolean default true,
+                                                                    nysiis                      boolean default true,
+                                                                    rating_codex                boolean default true,
+                                                                    usps_repl_first             boolean default true)
                 RETURNS SETOF string_dist_results AS $$
+
+                    \"\"\"
+
+                    General Idea:
+
+                        Given a list of tuples comprising strings and corresponding index values ("from_tuples"), and
+                        Given another list of tuples comprising strings and corresponding index values ("against_tuples");
+
+                        for _string,_idx in from_tuple.iteritems():
+                            find closest string match between _string and [ all strings in against_tuples ]
+
+
+                    Comments:
+
+                        input queries must use double single quotes ('') in place of normal single quotes (') used to indicate text types.
+
+                    Usage:
+
+                        Given:
+                            qry_1 = "select array[(1::integer,regexp_replace(''part_a-part_b'',''^([^-]*)-(.*)$'',''\\2'',''g''))] from_tuples"
+                            qry_2 = "select array[(101::integer,''no match here''),
+                                                  (102::integer,''partial match -part_b''),
+                                                  (103::integer,''part_b''),] against_tuples"
+
+                        Query:
+
+                            select z_jellyfish(qry_1,qry_2)
+
+                        Produces Results with Header:
+
+                            | from_str | from_idx | against_str | against_idx | jaro_b | etc ...
+
+
+                    \"\"\"
+
 
                     from jellyfish              import cjellyfish as J
                     from traceback              import format_exc       as tb_format_exc
@@ -1507,32 +1532,27 @@ class pgSQL_Functions:
                                 self.__dict__.update(upd)
 
 
-                    important_cols          =   [   'street_name','from_street_name',
-                                                    'variation','primary_name',
-                                                    'common_use','usps_abbr','pattern']
+                    T                       =   {   'from_qry'              :   from_str_idx_tuples_qry,
+                                                    'against_qry'           :   against_str_idx_tuples_qry,
+                                                }
+                    plpy.log(                   T)
 
-                    T                       =   {   'tbl'           :   compare_tbl,
-                                                    'concat_col'    :   ''.join(["concat_ws(' ',",
-                                                                                 ",".join(compare_col),
-                                                                                 ")"]),
-                                                    'not_null_cols' :   'WHERE ' + ' is not null and '.join([it for it in compare_col
-                                                                                            if important_cols.count(it)>0]) + ' is not null',
-                                                                                 }
-
-
-                    if T['not_null_cols']=='WHERE  is not null':
-                        T['not_null_cols']  =   ''
-
-                    #plpy.log(T)
                     try:
 
-                        p                   =   "select distinct ##(concat_col)s comparison from ##(tbl)s ##(not_null_cols)s;" ## T
+                        p                   =   \"\"\"
+                                                SELECT from_tuples,against_tuples
+                                                FROM
+                                                    (##(from_qry)s) f1,
+                                                    (##(against_qry)s) f2
+                                                \"\"\" ## T
+                        plpy.log(               p)
                         res                 =   plpy.execute(p)
                         if len(res)==0:
                             plpy.log(           "string_dist_results: NO DATA AVAILABLE FROM ##(tbl)s IN ##(tbl)s" ## T)
                             return
                         else:
-                            # plpy.log(res)
+                            plpy.log(           res)
+                            return
                             res             =   map(lambda s: unicode(s['comparison']),res)
 
                         #plpy.log("about to start")
@@ -1576,9 +1596,221 @@ class pgSQL_Functions:
 
                 $$ LANGUAGE plpythonu;
             """.replace('##','%')
-            self.T.conn.set_isolation_level(        0)
-            self.T.cur.execute(                     cmd)
+            self.T.to_sql(                     cmd)
             return
+        def z_str_comp_jaro(self):
+            cmd="""
+                DROP FUNCTION IF EXISTS         z_str_comp_jaro(text,text,boolean,boolean,boolean);
+                CREATE OR REPLACE FUNCTION      z_str_comp_jaro(s1              text,
+                                                                s2              text,
+                                                                verbose         boolean default true,
+                                                                winklerize      boolean default true,
+                                                                long_tolerance  boolean default true)
+                RETURNS                         double precision
+                AS $BODY$
+
+
+                function round (n)
+                    return math.floor((math.floor(n*2) + 1)/2)
+                end
+
+                function cjson_encode (tbl, verbose)
+                    local res
+                    if verbose then
+                        local cjson         =   require "cjson"
+                        res                 =   cjson.encode(tbl)
+                    else
+                        local _str          =   "["
+                        for i,v in ipairs(tbl) do
+                            _str            =   _str.."'"..v.."', "
+                        end
+                        _str                =   _str.."]"
+                        _str                =   _str.gsub("^(.*)(, )(%])$","%1%3")
+                        res                 =   _str
+                    end
+                    return res
+                end
+
+                function to_log (msg, verbose)
+                    if verbose then             log(msg) end
+                end
+                to_log(                         "NEW EXECUTION\\n\\n", verbose)
+
+
+                if #s1==0 or #s2==0 then
+                    log(                        "s1 or s2 has no length!")
+                end
+
+                -- set #a>#b
+                local a,b,m                 =   "","",0
+                if #s1<#s2 then     b,a     =   s1,s2
+                else                a,b     =   s1,s2   end
+                a,b                         =   a:upper(),b:upper()
+                --to_log(                         "a: "..a, verbose)
+
+                -- define max distance where character will be considered matching (despite tranposition)
+                local match_dist            =   round( (#a/2) - 1 )
+                if match_dist<0 then            match_dist=0 end
+                -- to_log(                         "match_dist="..match_dist, verbose)
+
+                -- create letter and flags tables
+                local a_tbl,b_tbl           =   {},{}
+                local a_flags,b_flags       =   {},{}
+                for i=1,#a do
+                    table.insert(               a_tbl,a:sub(i,i))
+                    table.insert(               a_flags,false)
+
+                    table.insert(               b_tbl,b:sub(i,i))
+                    table.insert(               b_flags,false)
+                end
+                for i=#a+1, #b do
+                    table.insert(               b_tbl,b:sub(i,i))
+                    table.insert(               b_flags,false)
+                end
+                -- to_log(                         "a_tbl "..cjson_encode(a_tbl, verbose) , verbose)
+                -- to_log(                         "b_tbl "..cjson_encode(b_tbl, verbose) , verbose)
+                -- to_log(                         "b_tbl[3] "..b_tbl[3] , verbose)
+
+                -- verify tables are proper length
+                if (not #a==#a_tbl==#a_flags) or (not #b==#b_tbl==#b_flags) then
+                    log(                        "issue with length of string/tbl/flags: "..#a.."/"..#a_tbl.."/"..#a_flags)
+                end
+
+                -- looking only within the match distance, count & flag matched pairs
+                local low,hi,common  =   0,0,0
+                local i
+                for _i,v in ipairs(a_tbl) do
+                    i = _i-1
+
+                    local cursor            =   v
+                    --to_log(                     "cursor_1="..cursor, verbose)
+
+                    if i>match_dist then
+                        low                 =   i-match_dist
+                        --to_log("low: this NOT happen", verbose)
+                    else
+                        --to_log("low: this happens", verbose)
+                        low                 =   0
+                    end
+                    if i+match_dist<=#b then
+                        --to_log("hi: this happens", verbose)
+                        hi                  =   i+match_dist
+                    else
+                        --to_log("hi: this NOT happen", verbose)
+                        hi                  =   #b
+                    end
+
+                    --to_log(                     "low_hi "..low.." "..hi, verbose)
+
+                    for _j=low+1, hi+1 do
+                        j                   =   _j-1
+
+                        --to_log(                 "ij "..i.." "..j, verbose)
+                        --to_log(                 "cursor "..cursor, verbose)
+                        --to_log(                 "b_tbl[j+1] "..b_tbl[j+1], verbose)
+
+                        if not b_flags[j+1] and b_tbl[j+1]==cursor then
+                            --to_log(             "BROKEN", verbose)
+                            a_flags[i+1]    =   true
+                            b_flags[j+1]    =   true
+                            common          =   common+1
+                            break
+                        end
+                    end
+                end
+                -- to_log(                         "a_flags="..cjson_encode(a_flags, verbose) , verbose)
+                -- to_log(                         "b_flags="..cjson_encode(b_flags, verbose) , verbose)
+
+                -- return nil if no exact or transpositional matches
+                if common==0 then               return nil end
+                -- to_log(                         "common = "..common, verbose)
+
+                -- count transpositions
+
+
+                --for i=1, #a do
+                local trans_count = 0
+                local _j
+                local first,k  =   true,1
+                for _i,v in ipairs(a_tbl) do
+                    i = _i - 1
+
+
+                    if a_flags[i+1] then
+
+                        for j=k, #b do
+                            _j = j - 1
+
+                            --to_log(            "i,j,_j= "..i..","..j..",".._j, verbose)
+                            --to_log(            "b_flags[j]= "..cjson_encode({b_flags[j]}, verbose) , verbose)
+
+                            if b_flags[j] then
+                                k = j+1
+                                break
+                            end
+                        end
+
+                        --to_log(                 "k= "..k, verbose)
+                        --to_log(                 "a_tbl[i+1]= "..a_tbl[i+1], verbose)
+
+                        if not j and first then
+                            _j,first        =   1,false
+                        else
+                            _j              =   _j + 1
+                        end
+
+                        --to_log(                 "b_tbl[_j]= "..b_tbl[_j], verbose)
+                        if a_tbl[i+1]~=b_tbl[_j] then
+                            if (not trans_count or trans_count==0) then trans_count = 1
+                            else trans_count = trans_count+1 end
+                        end
+
+                    end
+                end
+                trans_count                 =   trans_count/2
+                to_log(                         "trans_count = "..trans_count, verbose)
+
+                -- adjust for similarities in nonmatched characters
+                local weight                =   0
+                weight                      =   ( ( common/#a + common/#b +
+                                                    (common-trans_count)/common ) )/3
+                to_log(                         "weight = "..weight, verbose)
+
+                -- winkler modification: continue to boost if strings are similar
+                if winklerize and weight>0.7 and #a>3 and #b>3 then
+
+                    -- adjust for up to first 4 chars in common
+                    local i,j               =   0,0
+                    if match_dist<4 then        j=match_dist else j=4 end
+
+                    for i=1, j-1 do
+                        if a_tbl[i]==b_tbl[i] and #a<=i then
+                            i               =   i+1
+                        end
+                    end
+
+                    if i>0 then
+                        weight              =   weight + ( i * 0.1 * (1.0 - weight) )
+                    end
+
+                    -- optionally adjust for long strings
+                    -- after agreeing beginning chars, at least two or more must agree and
+                    -- agreed characters must be > half of remaining characters
+                    if ( long_tolerance and
+                         match_dist>4 and
+                         common>i+1 and
+                         2*common>=match_dist+i ) then
+                        weight              =   weight + ((1.0 - weight) * ( (common-i-1) / float(#a+#b-i*2+2)))
+                    end
+                    to_log(                     "new weight = "..weight, verbose)
+
+                end
+
+                return weight
+
+                $BODY$ LANGUAGE plluau;
+            """
+            self.T.to_sql(                      cmd)
 
         def z_update_with_geom_from_coords(self):
             """
@@ -2706,8 +2938,7 @@ class pgSQL_Functions:
                     return addr..", New York, NY, "..tostring(zipcode)
                 $$ LANGUAGE plluau;
             """
-            self.T.conn.set_isolation_level(       0)
-            self.T.cur.execute(                    cmd)
+            self.T.to_sql(                      cmd)
 
         def OLD_z_add_geom_through_addr_idx(self):
             a="""
@@ -3207,29 +3438,38 @@ class pgSQL_Triggers:
                     RETURNS event_trigger AS
                 $BODY$
                 DECLARE
-                    last_table text;
-                    has_last_updated boolean;
+                    last_table TEXT;
+                    has_last_updated BOOLEAN;
                 BEGIN
-                    last_table := ( select relname from pg_class
-                                    where relnamespace=2200
-                                    and relkind='r'
-                                    order by oid desc limit 1);
+                    last_table := ( SELECT relname FROM pg_class
+                                    WHERE relnamespace=2200
+                                    AND relkind='r'
+                                    ORDER BY oid DESC LIMIT 1);
 
-                    SELECT count(*)>0 INTO has_last_updated FROM information_schema.columns
-                        where table_name='||quote_ident(last_table)||'
-                        and column_name='last_updated';
+                    EXECUTE 'SELECT EXISTS ('
+                        || ' SELECT 1'
+                        || ' FROM information_schema.columns'
+                        || ' WHERE table_name='''
+                        || quote_ident(last_table)
+                        || ''' AND column_name=''last_updated'''
+                        || ' )'
+                        INTO has_last_updated;
+
+                    -- RAISE EXCEPTION 'has_last_updated is %', has_last_updated;
+
 
                     IF (
                         pg_trigger_depth()=0
-                        and has_last_updated=False
-                        and position('tmp_' in last_table)=0 )
+                        AND has_last_updated=False
+                        AND position('tmp_' in last_table)=0  --exclude public.tmp_*
+                        )
                     THEN
-                        execute format('alter table %I drop column if exists last_updated',last_table);
-                        execute format('alter table %I add column last_updated timestamp with time zone',last_table);
-                        execute format('DROP FUNCTION if exists z_auto_update_timestamp_on_%s_in_last_updated() cascade',last_table);
-                        execute format('DROP TRIGGER if exists update_timestamp_on_%s_in_last_updated ON %s',last_table,last_table);
+                        EXECUTE FORMAT('ALTER TABLE %I DROP COLUMN IF EXISTS last_updated',last_table);
+                        EXECUTE FORMAT('ALTER TABLE %I ADD COLUMN last_updated timestamp WITH TIME ZONE',last_table);
+                        EXECUTE FORMAT('DROP FUNCTION IF EXISTS z_auto_update_timestamp_on_%s_in_last_updated() CASCADE',last_table);
+                        EXECUTE FORMAT('DROP TRIGGER IF EXISTS update_timestamp_on_%s_in_last_updated ON %s',last_table,last_table);
 
-                        execute format('CREATE OR REPLACE FUNCTION z_auto_update_timestamp_on_%s_in_last_updated()'
+                        EXECUTE FORMAT('CREATE OR REPLACE FUNCTION z_auto_update_timestamp_on_%s_in_last_updated()'
                                         || ' RETURNS TRIGGER AS $$'
                                         || ' BEGIN'
                                         || '     NEW.last_updated := now();'
@@ -3238,7 +3478,7 @@ class pgSQL_Triggers:
                                         || ' $$ language ''plpgsql'';'
                                         || '',last_table);
 
-                        execute format('CREATE TRIGGER update_timestamp_on_%s_in_last_updated'
+                        EXECUTE FORMAT('CREATE TRIGGER update_timestamp_on_%s_in_last_updated'
                                         || ' BEFORE UPDATE OR INSERT ON %I'
                                         || ' FOR EACH ROW'
                                         || ' EXECUTE PROCEDURE z_auto_update_timestamp_on_%s_in_last_updated();'
@@ -7507,7 +7747,6 @@ class pgSQL_Tables:
                 # dropCols                  =   desc_cols + entry_cols + exit_cols + in_cols + out_cols + other_cols
                 self.T.pd.read_sql(             cmd,self.T.eng)#.drop(dropCols,axis=1)
 
-
 class pgSQL_Types:
 
     def __init__(self,_parent):
@@ -7545,6 +7784,10 @@ class pgSQL_Types:
 
         def __init__(self,_parent):
             self                            =   _parent.T.To_Sub_Classes(self,_parent)
+        def string_dist_results(self):
+            qry="""DROP TYPE IF EXISTS string_dist_results cascade;
+            """
+            self.T.to_sql(                  qry)
 
 class pgSQL:
 
@@ -7583,6 +7826,34 @@ class pgSQL:
             self.T.conn.set_isolation_level(    0)
             self.T.cur.execute(                 cmd)
 
+        def redirect_logs_to_file(file_desc='/dev/pts/0',msg_form="%(asctime)s - %(levelname)s - %(message)s"):
+            # print T.logger.__dict__
+            # print T.logger.manager.__dict__
+
+            # for it in dir(logger):
+            #     print it,getattr(logger,it)
+
+            for it in self.T.logger.handlers:
+                self.T.logger.removeHandler(it)
+
+            for it in self.T.logger.parent.handlers:
+                self.T.logger.parent.removeHandler(it)
+
+            for it in self.T.logger.root.handlers:
+                self.T.logger.root.removeHandler(it)
+
+            # print logger.manager.__dict__
+            del_these                       =   ['IPKernelApp','basic_logger']
+            for it in del_these:
+                if self.T.logger.manager.__dict__['loggerDict'].has_key(it):
+                    del self.T.logger.manager.__dict__['loggerDict'][it]
+
+            for k in self.T.logger.manager.__dict__['loggerDict'].keys():
+                if k.count('sqlalchemy') or k.count('pandas'):
+                    del self.T.logger.manager.__dict__['loggerDict'][k]
+
+            self.T.logging.basicConfig(filename=file_desc, level=self.T.logging.DEBUG, format=msg_form)
+            return
 
         import                                  datetime                as dt
         from dateutil                           import parser           as DU               # e.g., DU.parse('some date as str') --> obj(datetime.datetime)
@@ -7615,7 +7886,9 @@ class pgSQL:
         import                                  geopandas               as gd
         from sqlalchemy                         import create_engine
         import logging
-        logging.getLogger(                      'sqlalchemy.dialects.postgresql').setLevel(logging.INFO)
+        logger = logging.getLogger(                      'sqlalchemy.dialects.postgresql')
+        logger.setLevel(logging.INFO)
+
         eng                                 =   create_engine(r'postgresql://%s:%s@%s:%s/%s'
                                                           %(DB_USER,DB_PW,DB_HOST,DB_PORT,DB_NAME),
                                                           encoding='utf-8',
@@ -7634,23 +7907,26 @@ class pgSQL:
                                                                 dict_list=[D,locals()],
                                                                 update_globals=True)
 
-        ## Don't think these are needed anymore...
-        # from f_geolocation import get_bldg_street_idx
-        # from f_geolocation import get_addr_body,match_simple_regex
-        # from f_geolocation import match_simple,match_simple_regex,match_levenshtein_series
-
-
         self.Functions                      =   pgSQL_Functions(self)
         self.Triggers                       =   pgSQL_Triggers(self)
         self.Tables                         =   pgSQL_Tables(self)
-        self.__initial_check__()
+        self.Types                          =   pgSQL_Types(self)
+        self.__initial_check__(                 )
+        self.__temp_options__(                  )
 
     def __initial_check__(self):
-        # Confirm that geometry is enabled
+        # at minimum, confirm that geometry is enabled
         try:
-            self.T.to_sql('select geometry(Point,4326);')
+            self.T.to_sql("""   CREATE EXTENSION IF NOT EXISTS plpythonu;
+                                CREATE EXTENSION IF NOT EXISTS pllua;
+                                --CREATE EXTENSION IF NOT EXISTS plpgsql;
+                                CREATE EXTENSION IF NOT EXISTS postgis;""")
         except:
             self.F.functions_run_confirm_extensions()
+
+    def __temp_options__(self):
+
+        self.T.redirect_logs_to_file(                  '/tmp/tmplog')
 
 
 
