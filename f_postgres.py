@@ -8,43 +8,25 @@ from ipdb import set_trace as i_trace
 class pgSQL_Functions:
     """
 
-    NOTE: USE plpythonu and plluau for WRITE ACESS
+    NOTE: USE plpythonu and plluau for WRITE ACCESS
 
     """
 
     def __init__(self,_parent):
         self                                =   _parent.T.To_Sub_Classes(self,_parent)
 
-    class Run:
+    def exists(self,funct_name):
+        qry                                 =   """
+                                                SELECT EXISTS (SELECT 1
+                                                    FROM pg_proc
+                                                    WHERE proname='%s');
+                                                """ % funct_name
+        return                                  self.T.pd.read_sql(qry,self.T.eng).exists[0]
 
+    class Check:
         def __init__(self,_parent):
             self                            =   _parent.T.To_Sub_Classes(self,_parent)
-
-        def check_evt_trigger_enabled(self,trigger_name):
-            qry                             =   """ select evtenabled::text='O'::text enabled
-                                                    from pg_event_trigger
-                                                    where evtname='%s';
-                                                """ % trigger_name
-            return                              self.T.pd.read_sql(qry,self.T.eng).enabled[0]
-
-        def check_function_exists(self,funct_name):
-            qry                             =   """
-                                                SELECT count(*)>0 cnt
-                                                FROM pg_proc
-                                                WHERE proname='%s';
-                                                """ % funct_name
-            return                              self.T.pd.read_sql(qry,self.T.eng).cnt[0]
-
-        def check_table_exists(self,table_name):
-            qry                             =   """
-                                                SELECT count(*)>0 cnt
-                                                FROM information_schema.tables
-                                                WHERE table_schema='public'
-                                                AND table_name='%s';
-                                                """ % table_name
-            return                              self.T.pd.read_sql(qry,self.T.eng).cnt[0]
-
-        def check_primary_key(self,table_name):
+        def primary_key(self,table_name):
             qry                             =   """
                                                 select relhasindex has_index
                                                 from pg_class
@@ -55,21 +37,25 @@ class pgSQL_Functions:
             x                               =   self.T.pd.read_sql(qry,self.T.eng)
             return                              True if len(x['has_index']) and x['has_index'][0]==True else False
 
+    class Run:
+
+        def __init__(self,_parent):
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+
         def make_column_primary_serial_key(self,table_name,uid_col='uid',is_new_col=True):
             """
             Usage: make_column_primary_serial_key('table_name','uid_col',is_new_col=True)
             """
-            if not self.T.check_function_exists('z_make_column_primary_serial_key'):
-                self._parent.Create.z_make_column_primary_serial_key()
+            if not self.F.functions_exists('z_make_column_primary_serial_key'):
+                self.F.functions_run_make_column_primary_serial_key()
             T                               =   {'tbl'                  :   table_name,
                                                  'uid_col'              :   uid_col,
                                                  'is_new_col'           :   is_new_col}
             cmd                             =   """select z_make_column_primary_serial_key( '%(tbl)s',
                                                                                         '%(uid_col)s',
                                                                                          %(is_new_col)s );
-                                            """ % T
-            self.T.conn.set_isolation_level(    0)
-            self.T.cur.execute(                 cmd)
+                                                """ % T
+            self.T.to_sql(                      cmd)
 
         def get_geocode_info(self,addr_queries):
             addr_queries                =   addr_queries if type(addr_queries)==list else [addr_queries]
@@ -79,6 +65,29 @@ class pgSQL_Functions:
                                             """ % T
             res                         =   self.T.pd.read_sql(cmd,self.T.eng).res
             return res
+
+        def confirm_extensions(self):
+            qry =   """
+                    CREATE EXTENSION IF NOT EXISTS plpythonu;
+                    --CREATE EXTENSION IF NOT EXISTS pllua;
+                    --CREATE EXTENSION IF NOT EXISTS plpgsql;
+                    CREATE EXTENSION IF NOT EXISTS postgis;
+                    --CREATE EXTENSION IF NOT EXISTS postgis_topology;
+                    --CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
+                    --CREATE EXTENSION IF NOT EXISTS pgrouting;
+                    """
+            self.T.to_sql(qry)
+            print 'Extensions Confirmed'
+            if not self.F.triggers_exists_event_trigger('missing_primary_key_trigger'):
+                idx_trig = raw_input('add trigger to automatically create column "uid" as index col if table created without index column? (y/n)\t')
+                if idx_trig=='y':
+                    self.F.triggers_create_z_auto_add_primary_key()
+            if not self.F.triggers_exists_event_trigger('missing_last_updated_field'):
+                modified_trig = raw_input('add trigger to automatically create column "last_updated" for all new tables and update col/row when row modified? (y/n)\t')
+                if modified_trig=='y':
+                    self.F.triggers_create_z_auto_add_last_updated_field()
+                    #### self.F.triggers_create_z_auto_update_timestamp()
+            return
 
     class Create:
 
@@ -96,7 +105,7 @@ class pgSQL_Functions:
 
 
             """
-            self.T.confirm_extensions()
+            self.F.functions_run_confirm_extensions()
             cmd="""
 
                 CREATE OR REPLACE FUNCTION z_make_column_primary_serial_key(
@@ -176,9 +185,11 @@ class pgSQL_Functions:
             self.T.cur.execute(                    cmd)
             self.T.z_next_free(                 )
         def z_next_free(self):
-            self.T.confirm_extensions()
+            self.F.functions_run_confirm_extensions()
             cmd="""
-                --DROP FUNCTION z_next_free(text, text, text);
+                -- don't use drop ... cascade if tables depend on this function
+                DROP FUNCTION IF EXISTS z_next_free(text, text, text) CASCADE;
+
 
                 CREATE OR REPLACE FUNCTION z_next_free( table_name text,
                                                         uid_col text,
@@ -187,6 +198,26 @@ class pgSQL_Functions:
                 $BODY$
                 stop=False
                 T = {'tbl':table_name,'uid_col':uid_col,'_seq':_seq}
+                # p = \"\"\"
+                #
+                #         SELECT _tbl_cnt,_seq_cnt
+                #         FROM
+                #             (SELECT count(*)>0 _tbl_cnt
+                #             FROM information_schema.tables
+                #             WHERE table_schema='public' AND table_name='%(tbl)s') f1,
+                #             (SELECT count(*)>0 _seq_cnt FROM pg_class
+                #              WHERE relname = concat_ws('_','%(tbl)s','%(uid_col)s','seq')) f2;
+                #     \"\"\" % T
+                # tbl = plpy.execute(p)[0]['_tbl_cnt']
+                # seq = plpy.execute(p)[0]['_seq_cnt']
+                # plpy.log(tbl)
+                # plpy.log(seq)
+                # if not seq and tbl:
+                #     p = "create sequence %(tbl)s_%(uid_col)s_seq start with 1;"%T
+                #     t = plpy.execute(p)
+                # if tbl and seq:
+                #     p = "alter table %(tbl)s alter column %(uid_col)s set DEFAULT z_next_free('%(tbl)s'::text, 'uid'::text, '%(tbl)s_uid_seq'::text);"%T
+                #     t = plpy.execute(p)
                 p = \"\"\"
 
                             select count(column_name) c
@@ -209,16 +240,25 @@ class pgSQL_Functions:
                         t = plpy.execute(p)[0]['next_val']
                     except plpy.spiexceptions.UndefinedTable:
                         p = "select max(%(uid_col)s) from %(tbl)s;" % T
-                        max_num = plpy.execute(p)[0]['max']
-                        if max_num:
-                            T.update({'max_num':str(max_num)})
-                        else:
+                        try:
+                            max_num = plpy.execute(p)[0]['max']
+                            if max_num:
+                                T.update({'max_num':str(max_num)})
+                            else:
+                                T.update({'max_num':str(1)})
+                        except plpy.spiexceptions.UndefinedTable:
                             T.update({'max_num':str(1)})
                         p = "create sequence %(tbl)s_%(uid_col)s_seq start with %(max_num)s;" % T
                         t = plpy.execute(p)
                         p = "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T
                         t = plpy.execute(p)[0]['next_val']
                     T.update({'next_val':t})
+                    # if tbl:
+                    #     p = "SELECT count(%(uid_col)s) cnt from %(tbl)s where %(uid_col)s=%(next_val)s"%T
+                    #     chk = plpy.execute(p)[0]['cnt']
+                    # if not tbl or not chk:
+                    #     stop=True
+                    #     break
                     p = "SELECT count(%(uid_col)s) cnt from %(tbl)s where %(uid_col)s=%(next_val)s"%T
                     chk = plpy.execute(p)[0]['cnt']
                     if chk==0:
@@ -230,6 +270,7 @@ class pgSQL_Functions:
             """
             self.T.conn.set_isolation_level(       0)
             self.T.cur.execute(                    cmd)
+            print 'Added: f(x) z_next_free'
         def z_get_way_between_ways(self):
             cmd="""CREATE OR REPLACE FUNCTION
                     z_get_way_between_ways( IN get_way text, in ways1 text,
@@ -1302,6 +1343,11 @@ class pgSQL_Functions:
             self.T.cur.execute(                     cmd)
             return
         def z_get_string_dist(self):
+            """
+            compare_col is concat_ws(' ',...)
+
+
+            """
             cmd="""
 
                 DROP TYPE IF EXISTS string_dist_results cascade;
@@ -1316,10 +1362,17 @@ class pgSQL_Functions:
                     rating_codex text
                 );
 
-                DROP FUNCTION IF EXISTS z_get_string_dist(integer[],text,text,text[],
-                                                                boolean,boolean,boolean,boolean,boolean);
+                DROP FUNCTION IF EXISTS     z_get_string_dist(      integer[],
+                                                                    text,
+                                                                    text,
+                                                                    text[],
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean);
 
-                CREATE OR REPLACE FUNCTION z_get_string_dist(       idx             integer[],
+                CREATE OR REPLACE FUNCTION  z_get_string_dist(      idx             integer[],
                                                                     string_set      text[],
                                                                     compare_tbl     text,
                                                                     compare_col     text[],
@@ -1330,78 +1383,195 @@ class pgSQL_Functions:
                                                                     usps_repl_first boolean default true)
                 RETURNS SETOF string_dist_results AS $$
 
-                    from jellyfish                      import cjellyfish as J
-                    from traceback                      import format_exc       as tb_format_exc
-                    from sys                            import exc_info         as sys_exc_info
+                    from jellyfish              import cjellyfish as J
+                    from traceback              import format_exc       as tb_format_exc
+                    from sys                    import exc_info         as sys_exc_info
 
                     class string_dist_results:
 
                         def __init__(self,upd=None):
                             if upd:
-                                self.__dict__.update(       upd)
+                                self.__dict__.update(upd)
 
 
-                    important_cols = [  'street_name','from_street_name','variation','primary_name','common_use',
-                                        'usps_abbr','pattern']
-                    T = {   'tbl'           :   compare_tbl,
-                            'concat_col'    :   ''.join(["concat_ws(' ',",
-                                                         ",".join(compare_col),
-                                                         ")"]),
-                            'not_null_cols' :   'WHERE ' + ' is not null and '.join([it for it in compare_col
-                                                                    if important_cols.count(it)>0]) + ' is not null',
-                                                         }
-                    if T['not_null_cols']=='WHERE is not null':
-                        T['not_null_cols']=''
+                    important_cols          =   [   'street_name','from_street_name',
+                                                    'variation','primary_name',
+                                                    'common_use','usps_abbr','pattern']
+
+                    T                       =   {   'tbl'           :   compare_tbl,
+                                                    'concat_col'    :   ''.join(["concat_ws(' ',",
+                                                                                 ",".join(compare_col),
+                                                                                 ")"]),
+                                                    'not_null_cols' :   'WHERE ' + ' is not null and '.join([it for it in compare_col
+                                                                                            if important_cols.count(it)>0]) + ' is not null',
+                                                                                 }
+
+
+                    if T['not_null_cols']=='WHERE  is not null':
+                        T['not_null_cols']  =   ''
 
                     #plpy.log(T)
                     try:
 
-                        p = "select distinct ##(concat_col)s comparison from ##(tbl)s ##(not_null_cols)s;" ## T
-                        res = plpy.execute(p)
+                        p                   =   "select distinct ##(concat_col)s comparison from ##(tbl)s ##(not_null_cols)s;" ## T
+                        res                 =   plpy.execute(p)
                         if len(res)==0:
-                            plpy.log("string_dist_results: NO DATA AVAILABLE FROM ##(tbl)s IN ##(tbl)s" ## T)
+                            plpy.log(           "string_dist_results: NO DATA AVAILABLE FROM ##(tbl)s IN ##(tbl)s" ## T)
                             return
                         else:
-                            #plpy.log(res)
-                            res = map(lambda s: s['comparison'],res)
+                            # plpy.log(res)
+                            res             =   map(lambda s: unicode(s['comparison']),res)
 
                         #plpy.log("about to start")
                         for i in range(len(idx)):
                             #plpy.log("started")
-                            _word               =   string_set[i].upper()
+                            _word           =   unicode(string_set[i].upper())
                             if not _word:
-                                plpy.log(string_set)
-                                plpy.log("not word")
-                                plpy.log(_word)
-                                yield(              None)
+                                plpy.log(       string_set)
+                                plpy.log(       "not word")
+                                plpy.log(       _word)
+                                yield(          None)
 
                             else:
 
-                                t               =   {   'idx'               :   idx[i],
-                                                        'orig_str'          :   _word   }
-                                #plpy.log(t)
+                                t           =   {   'idx'           :   idx[i],
+                                                    'orig_str'      :   _word   }
                                 if jaro:
-                                    t.update(       dict(zip(['jaro','jaro_b'],
-                                                        sorted(map(lambda s: (J.jaro_distance(_word,s),s),res ) )[-1:][0])))
+                                    # plpy.log(t)
+                                    t.update(   dict(zip(['jaro','jaro_b'],
+                                                     sorted(map(lambda s: (J.jaro_distance(_word,s),s),res ) )[-1:][0])))
                                 if leven:
-                                    t.update(       dict(zip(['leven','leven_b'],
-                                                        sorted(map(lambda s: (J.levenshtein_distance(_word,s),s),res ) )[0:][0])))
+                                    t.update(   dict(zip(['leven','leven_b'],
+                                                     sorted(map(lambda s: (J.levenshtein_distance(_word,s),s),res ) )[0:][0])))
                                 if nysiis:
-                                    t.update(       {   'nysiis'            :   J.nysiis(_word)                 })
+                                    t.update(   {   'nysiis'            :   J.nysiis(_word)                 })
 
                                 if rating_codex:
-                                    t.update(       {   'rating_codex'      :   J.match_rating_codex(_word)     })
+                                    t.update(   {   'rating_codex'      :   J.match_rating_codex(_word)     })
 
-                                r               =   string_dist_results(t)
-                                #plpy.log(t)
-                                yield(              r)
+                                # plpy.log(t)
+                                r           =   string_dist_results(t)
+                                yield(          r)
 
                         return
 
                     except Exception as e:
-                        plpy.log(                       tb_format_exc())
-                        plpy.log(                       sys_exc_info()[0])
-                        plpy.log(                       e)
+                        plpy.log(               tb_format_exc())
+                        plpy.log(               sys_exc_info()[0])
+                        plpy.log(               e)
+                        return
+
+                $$ LANGUAGE plpythonu;
+            """.replace('##','%')
+            self.T.conn.set_isolation_level(        0)
+            self.T.cur.execute(                     cmd)
+            return
+
+        def z_jellyfish(self):
+            """
+            compare_col is concat_ws(' ',...)
+
+
+            """
+            cmd="""
+
+                DROP FUNCTION IF EXISTS     z_jellyfish(            integer[],
+                                                                    text,
+                                                                    text,
+                                                                    text[],
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean,
+                                                                    boolean);
+
+                CREATE OR REPLACE FUNCTION  z_jellyfish(            m_from_qry      text[],
+                                                                    string_set      text[],
+                                                                    compare_tbl     text,
+                                                                    compare_col     text[],
+                                                                    jaro            boolean default true,
+                                                                    leven           boolean default true,
+                                                                    nysiis          boolean default true,
+                                                                    rating_codex    boolean default true,
+                                                                    usps_repl_first boolean default true)
+                RETURNS SETOF string_dist_results AS $$
+
+                    from jellyfish              import cjellyfish as J
+                    from traceback              import format_exc       as tb_format_exc
+                    from sys                    import exc_info         as sys_exc_info
+
+                    class string_dist_results:
+
+                        def __init__(self,upd=None):
+                            if upd:
+                                self.__dict__.update(upd)
+
+
+                    important_cols          =   [   'street_name','from_street_name',
+                                                    'variation','primary_name',
+                                                    'common_use','usps_abbr','pattern']
+
+                    T                       =   {   'tbl'           :   compare_tbl,
+                                                    'concat_col'    :   ''.join(["concat_ws(' ',",
+                                                                                 ",".join(compare_col),
+                                                                                 ")"]),
+                                                    'not_null_cols' :   'WHERE ' + ' is not null and '.join([it for it in compare_col
+                                                                                            if important_cols.count(it)>0]) + ' is not null',
+                                                                                 }
+
+
+                    if T['not_null_cols']=='WHERE  is not null':
+                        T['not_null_cols']  =   ''
+
+                    #plpy.log(T)
+                    try:
+
+                        p                   =   "select distinct ##(concat_col)s comparison from ##(tbl)s ##(not_null_cols)s;" ## T
+                        res                 =   plpy.execute(p)
+                        if len(res)==0:
+                            plpy.log(           "string_dist_results: NO DATA AVAILABLE FROM ##(tbl)s IN ##(tbl)s" ## T)
+                            return
+                        else:
+                            # plpy.log(res)
+                            res             =   map(lambda s: unicode(s['comparison']),res)
+
+                        #plpy.log("about to start")
+                        for i in range(len(idx)):
+                            #plpy.log("started")
+                            _word           =   unicode(string_set[i].upper())
+                            if not _word:
+                                plpy.log(       string_set)
+                                plpy.log(       "not word")
+                                plpy.log(       _word)
+                                yield(          None)
+
+                            else:
+
+                                t           =   {   'idx'           :   idx[i],
+                                                    'orig_str'      :   _word   }
+                                if jaro:
+                                    # plpy.log(t)
+                                    t.update(   dict(zip(['jaro','jaro_b'],
+                                                     sorted(map(lambda s: (J.jaro_distance(_word,s),s),res ) )[-1:][0])))
+                                if leven:
+                                    t.update(   dict(zip(['leven','leven_b'],
+                                                     sorted(map(lambda s: (J.levenshtein_distance(_word,s),s),res ) )[0:][0])))
+                                if nysiis:
+                                    t.update(   {   'nysiis'            :   J.nysiis(_word)                 })
+
+                                if rating_codex:
+                                    t.update(   {   'rating_codex'      :   J.match_rating_codex(_word)     })
+
+                                # plpy.log(t)
+                                r           =   string_dist_results(t)
+                                yield(          r)
+
+                        return
+
+                    except Exception as e:
+                        plpy.log(               tb_format_exc())
+                        plpy.log(               sys_exc_info()[0])
+                        plpy.log(               e)
                         return
 
                 $$ LANGUAGE plpythonu;
@@ -2920,13 +3090,37 @@ class pgSQL_Triggers:
     def __init__(self,_parent):
         self                                =   _parent.T.To_Sub_Classes(self,_parent)
 
+    class Exists:
+        def __init__(self,_parent):
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+        def event_trigger(self,trigger_name):
+            qry                             =   """
+                                                SELECT EXISTS (SELECT 1
+                                                    FROM pg_event_trigger
+                                                    WHERE evtname='%s'
+                                                    AND evtenabled='O');
+                                                """ % trigger_name
+            return                              self.T.pd.read_sql(qry,self.T.eng).exists[0]
+
+    class Enabled:
+        def __init__(self,_parent):
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+        def event_trigger(self,trigger_name):
+            qry                             =   """
+                                                SELECT EXISTS (SELECT 1
+                                                    FROM pg_event_trigger
+                                                    WHERE evtname='%s');
+                                                """ % trigger_name
+            return                              self.T.pd.read_sql(qry,self.T.eng).exists[0]
+
     class Create:
         def __init__(self,_parent):
             self                            =   _parent.T.To_Sub_Classes(self,_parent)
 
         def z_auto_add_primary_key(self):
+            self.T.z_next_free()
             c                           =   """
-                DROP FUNCTION if exists z_auto_add_primary_key();
+                DROP FUNCTION if exists z_auto_add_primary_key() CASCADE;
 
                 CREATE OR REPLACE FUNCTION z_auto_add_primary_key()
                     RETURNS event_trigger AS
@@ -2975,16 +3169,18 @@ class pgSQL_Triggers:
                                                     alter column uid type integer,
                                                     alter column uid set not null,
                                                     alter column uid set default z_next_free(
-                                                        ''%I'',
-                                                        ''uid'',
-                                                        ''%I''),
-                                                    ADD PRIMARY KEY (uid);',tbl_name,tbl_name,_seq);
+                                                        ''%I''::text,
+                                                        ''uid''::text,
+                                                        ''%I''::text),
+                                                    ADD PRIMARY KEY (uid)',tbl_name,tbl_name,'_seq');
                             ELSE
                                 --RAISE NOTICE 'NOT HAVE UID COL';
                                 _seq = format('%I_uid_seq',tbl_name);
                                 execute format('alter table %I add column uid integer primary key
-                                                default z_next_free(''%I'',''uid'',''%I'')',
-                                                tbl_name,tbl_name,_seq);
+                                                default z_next_free(
+                                                        ''%I''::text,
+                                                        ''uid''::text,
+                                                        ''%I''::text)',tbl_name,tbl_name,'_seq');
                             END IF;
 
                         END IF;
@@ -3001,8 +3197,8 @@ class pgSQL_Triggers:
                 WHEN TAG IN ('CREATE TABLE','CREATE TABLE AS')
                 EXECUTE PROCEDURE z_auto_add_primary_key();
                                                 """
-            self.T.conn.set_isolation_level(           0)
-            self.T.cur.execute(                        c)
+            self.T.to_sql(                      c)
+            print 'Added: f(x) z_auto_add_primary_key'
         def z_auto_add_last_updated_field(self):
             c                           =   """
                 DROP FUNCTION if exists z_auto_add_last_updated_field() cascade;
@@ -3329,10 +3525,10 @@ class pgSQL_Triggers:
             self.T.cur.execute(                     cmd)
             return
         def z_parse_address_on_gid_addr_zip(self,tbl,
-                                        gid_col='gid',
-                                        addr_col='address',
-                                        zip_col='zipcode',
-                                        verbose=False):
+                                                gid_col='gid',
+                                                addr_col='address',
+                                                zip_col='zipcode',
+                                                verbose=False):
             """
             alter table tmp_5e244d5
                 add column bldg text,
@@ -3558,10 +3754,13 @@ class pgSQL_Triggers:
             self.T.conn.set_isolation_level(        0)
             self.T.cur.execute(                     cmd)
         def enable_tbl_trigger(self,tbl,trigger_name):
+            if trigger_name=='z_auto_add_primary_key':
+                trigger_name                =   'missing_primary_key_trigger'
             cmd = "ALTER TABLE %(tbl)s ENABLE TRIGGER %(trig)s;" % {'tbl':tbl,'trig':trigger_name}
-            self.T.conn.set_isolation_level(        0)
-            self.T.cur.execute(                     cmd)
+            self.T.to_sql(                      cmd)
         def disable_event_trigger(self,trigger_name):
+            if trigger_name=='z_auto_add_primary_key':
+                trigger_name                =   'missing_primary_key_trigger'
             cmd                             =   'ALTER EVENT TRIGGER %s DISABLE' % trigger_name
             self.T.to_sql(                      cmd)
         def enable_event_trigger(self,trigger_name):
@@ -3580,6 +3779,15 @@ class pgSQL_Tables:
 
     def __init__(self,_parent):
         self                                =   _parent.T.To_Sub_Classes(self,_parent)
+
+    def exists(self,table_name):
+        qry                                 =   """
+                                                SELECT EXISTS (SELECT 1
+                                                    FROM information_schema.tables
+                                                    WHERE table_schema='public'
+                                                    AND table_name='%s');
+                                                """ % table_name
+        return                                  self.T.pd.read_sql(qry,self.T.eng).exists[0]
 
     class Update:
         def __init__(self,_parent):
@@ -3989,7 +4197,7 @@ class pgSQL_Tables:
                 self                        =   _parent.T.To_Sub_Classes(self,_parent)
 
             def update_mvn(self):
-                pluto_file                  =   'mn_pluto'
+                pluto_file                  =   self.T.PLUTO_TBL
 
                 url                         =   'https://data.cityofnewyork.us/api/views/xx67-kt59/rows.xlsx?accessType=DOWNLOAD'
                 save_path                   =   'restaurant_data.xlxs'
@@ -4028,14 +4236,14 @@ class pgSQL_Tables:
                 self.T.to_sql(                  'drop table if exists mnv_tmp')
                 mv.to_sql(                      'mnv_tmp',self.T.eng,index=False)
 
-                if not pg.Functions.Run.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                if not self.F.triggers_enabled_event_trigger('missing_primary_key_trigger'):
                     self.T.to_sql(              """
                                                 alter table mnv_tmp add column uid serial primary key;
                                                 update mnv_tmp set uid = nextval(pg_get_serial_sequence('mnv_tmp','uid'));
                                                 """)
 
-                if not self.T.check_table_exists('mnv'):
-                    self._parent._parent.Create.NYC.mnv()
+                if not self.F.tables_exists('mnv'):
+                    self.F.tables_create_nyc_mnv()
 
                 # upsert 'mnv'
                 cmd="""
@@ -4113,26 +4321,6 @@ class pgSQL_Tables:
 
         def __init__(self,_parent):
             self                            =   _parent.T.To_Sub_Classes(self,_parent)
-
-        def confirm_extensions(self):
-            qry =   """
-                    CREATE EXTENSION IF NOT EXISTS plpythonu;
-                    --CREATE EXTENSION IF NOT EXISTS pllua;
-                    --CREATE EXTENSION IF NOT EXISTS plpgsql;
-                    CREATE EXTENSION IF NOT EXISTS postgis;
-                    --CREATE EXTENSION IF NOT EXISTS postgis_topology;
-                    --CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
-                    --CREATE EXTENSION IF NOT EXISTS pgrouting;
-                    """
-            self.T.to_sql(qry)
-            idx_trig = raw_input('add trigger to automatically create column "uid" as index col if table created without index column? (y/n)')
-            if idx_trig=='y':
-                self._parent._parent.Triggers.Create.z_auto_add_primary_key()
-            modified_trig = raw_input('add trigger to automatically create column "last_updated" for all new tables and update col/row when row modified? (y/n)')
-            if modified_trig=='y':
-                self._parent._parent.Triggers.Create.z_auto_add_last_updated_field()
-                self._parent._parent.Triggers.Create.z_auto_update_timestamp()
-            return
 
         def scrape_lattice(self,pt_buff_in_miles,lattice_table_name):
             meters_in_one_mile              =   1609.34
@@ -6289,7 +6477,7 @@ class pgSQL_Tables:
                 sql_file                    =   save_dir + 'mn_pluto.sql'
                 log_f                       =   save_dir + 'shp_import.log'
                 pw                          =   getpass.getpass('root password?\t')
-                tbl_name                    =   'mn_pluto'
+                tbl_name                    =   self.T.PLUTO_TBL
                 print 'Using title "%s" for pluto table.' % tbl_name
 
                 from subprocess                 import Popen            as sub_popen
@@ -6304,8 +6492,8 @@ class pgSQL_Tables:
                                                            '< %s" 2>&1 > %s 2>&1' % (sql_file,log_f)])
                                                 ]
                 (_out,_err)                 =   sub_popen('; '.join(cmds),stdout=sub_PIPE,shell=True).communicate()
-                assert not _out1
-                assert _err1 is None
+                assert not _out
+                assert _err is None
                 clean_up=raw_input('remove all files (INCLUDING LOG: %s) that were created for this function? (y/n)\t' % log_f)
                 if clean_up=='y':
                     cmds                    =   ['rm -fr %s' % save_dir,
@@ -6352,106 +6540,631 @@ class pgSQL_Tables:
                     self.T.make_column_primary_serial_key('mnv','uid')
 
             def turnstile_data(self):
-                # Add subway entrances to map
-                url                         =   'http://web.mta.info/developers/data/nyct/subway/StationEntrances.csv'
-                s                           =   self.T.pd.read_csv(url)
-                s.columns                   =   [it.lower().strip() for it in s.columns.tolist()]
-                self.T.to_sql(                  'drop table if exists sub_stat_entr')
-                s.to_sql(                       'sub_stat_entr',self.T.eng)
+                """
+                NOTE:   NYC Turn Stile data format changed starting 10/18/14.
+                        This function was developed before 10/18/14 and only applies to data in the older format.
 
-                if not pg.Functions.Run.check_evt_trigger_enabled('missing_primary_key_trigger'):
-                    self.T.to_sql(              """
-                                                alter table sub_stat_entr add column uid serial primary key;
-                                                update sub_stat_entr set uid = nextval(pg_get_serial_sequence('sub_stat_entr','uid'));
-                                                """)
+                General Source for NYC Turn Stiles Info:   http://web.mta.info/developers/turnstile.html
 
-                self.T.to_sql(                  'alter table sub_stat_entr add column geom geometry(Point,4326)')
-                self.T.to_sql(                  "UPDATE sub_stat_entr set geom = ST_SetSRID(ST_MakePoint(station_longitude,station_latitude),4326)")
+                     - field description (current, as of 2015.09.01):
+                        http://web.mta.info/developers/resources/nyct/turnstile/ts_Field_Description.txt
 
-                if not self.T.check_table_exists(pluto_file):
-                    print 'This function depends on NYC tax lot geometries (MapPLUTO) being available in pgSQL.'
-                    print 'Currently this is looking for table "%s"' % pluto_file
-                    print 'If no pluto table exists, run "import f_postgres as PG; pg=PG.pgSQL(); pg.Create.NYC.pluto();"'
-                    print 'Else, consider changing the target table variable at the top of this function'
-
-                self.T.to_sql(                  """ DELETE FROM sub_stat_entr
-                                                    WHERE NOT (geom && (
-                                                        SELECT ST_Buffer(ST_ConvexHull((ST_Collect(f.the_geom))), .0005) as geom
-                                                        FROM ( SELECT *, (ST_Dump(geom)).geom As the_geom
-                                                        FROM %s) As f))""" % pluto_file)
+                     - data key:
+                        http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls
+                        --> this provides the Remote Unit/Control & Area/Station Name Key
 
 
-                # Add subway stops to map; add turn stile data to subway stops
-
-                import zipfile, StringIO
-                r                           =   self.T.requests.get('http://web.mta.info/developers/data/nyct/subway/google_transit.zip')
-                z                           =   zipfile.ZipFile(StringIO.StringIO(r.content))
-                sub_stops                   =   self.T.pd.read_csv(z.open('stops.txt'))
-                self.T.to_sql(                  'drop table if exists sub_stops;')
-                sub_stops.to_sql(               'sub_stops',self.T.eng)
-
-                if not pg.Functions.Run.check_evt_trigger_enabled('missing_primary_key_trigger'):
-                    self.T.to_sql(              """
-                                                alter table sub_stops add column uid serial primary key;
-                                                update sub_stops set uid = nextval(pg_get_serial_sequence('sub_stops','uid'));
-                                                """)
-
-                self.T.to_sql(                  "alter table sub_stops add column geom geometry(Point,4326)")
-                self.T.to_sql(                  "UPDATE sub_stops set geom = ST_SetSRID(ST_MakePoint(stop_lon,stop_lat),4326)")
-                self.T.to_sql(                  """ DELETE FROM sub_stops
-                                                    WHERE NOT (geom && (
-                                                        SELECT ST_Buffer(ST_ConvexHull((ST_Collect(f.the_geom))), .0005) as geom
-                                                        FROM ( SELECT *, (ST_Dump(geom)).geom As the_geom
-                                                        FROM %s) As f))""" % pluto_file)
-
-                # Add turn stile key/legend to pgsql
-
-                ts_key                      =   self.T.pd.read_excel('http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls')
-                ts_key.columns              =   [str(it).lower().replace(' ','_') for it in ts_key.columns.tolist()]
-                ts_key['line_name']         =   ts_key['line_name'].map(lambda s: ''.join(sorted([str(it) for it in s])) if type(s)!=int else str(s))
-                ts_key['clean']             =   ts_key.station.map(lambda s: s.lower())
-                self.T.to_sql(                  "drop table if exists ts_key")
-                ts_key.to_sql(                  'ts_key',self.T.eng,index=False)
-
-                # Add turn stile data to pgsql
-                # General Source for Turn Stiles: http://web.mta.info/developers/turnstile.html
-                #     - field description: http://web.mta.info/developers/resources/nyct/turnstile/ts_Field%20Description.txt
-                #     - data key: http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls
-                #         --> this is the provides the Remote Unit/Control Area/Station Name Key
-                # Need coords for "UNIT"
-                # Remote and Station Name here:
-                #      'http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls'
-                # Station Names and Coords here:
-                #      'http://web.mta.info/developers/data/nyct/subway/StationEntrances.csv'
-                #     - Relevant stations were added to pgsql as 'sub_stat_entr'
+                Remote and Station Name:
+                    - see source for 'data kay' above
 
 
-                cols                        =   ['C/A','UNIT','SCP','DATE1','TIME1','DESC1','ENTRIES1','EXITS1',
-                                                 'DATE2','TIME2','DESC2','ENTRIES2','EXITS2','DATE3','TIME3','DESC3','ENTRIES3',
-                                                 'EXITS3','DATE4','TIME4','DESC4','ENTRIES4','EXITS4','DATE5','TIME5','DESC5',
-                                                 'ENTRIES5','EXITS5','DATE6','TIME6','DESC6','ENTRIES6',
-                                                 'EXITS6','DATE7','TIME7','DESC7','ENTRIES7','EXITS7','DATE8',
-                                                 'TIME8','DESC8','ENTRIES8','EXITS8']
-                cols                        =   [str(it).lower().replace('/','_') for it in cols]
-                url                         =   'http://web.mta.info/developers/data/nyct/turnstile/turnstile_141004.txt'
-                p                           =   self.T.pd.read_csv(url,names=cols)
-                idx                         =   p[p.unit.str.contains('R')==False].index
-                p                           =   p.drop(idx,axis=0).reset_index(drop=True)
+                Station Names and Coords here:
+                     'http://web.mta.info/developers/data/nyct/subway/StationEntrances.csv'
+                     - Relevant stations were added to pgsql as 'sub_stat_entr'
 
-                dropCols = []
-                for it in cols:
-                    if it.find('exit')==0 or it.find('entries')==0:
-                        p[it]               =   p[it].map(float)
-                    if it.find('date')==0:
-                        date_pt,time_pt,datetime_pt = it,'time'+it[4:],'datetime'+it[4:]
-                        p[datetime_pt]      =   self.T.pd.to_datetime(p[date_pt] + ' ' + p[time_pt],format='%m-%d-%y %H:%M:%S',coerce=False)
-                        p[datetime_pt]      =   p[datetime_pt].map(lambda s: None if str(s)=='NaT' else str(s))
-                        dropCols.extend(        [date_pt,time_pt])
-                p                           =   p.drop(dropCols,axis=1)
-                cols                        =   p.columns.tolist()
+                """
+
+                def add_station_geoms(remove_non_mn=False):
+                    url                         =   'http://web.mta.info/developers/data/nyct/subway/StationEntrances.csv'
+                    s                           =   self.T.pd.read_csv(url)
+                    s.columns                   =   [it.lower().strip() for it in s.columns.tolist()]
+                    self.T.to_sql(                  'drop table if exists sub_stations')
+                    s.to_sql(                       'sub_stations',self.T.eng,index=False)
+
+                    if not self.T.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                        self.T.to_sql(              """
+                                                    alter table sub_stations add column uid serial primary key;
+                                                    update sub_stations set uid = nextval(pg_get_serial_sequence('sub_stations','uid'));
+                                                    """)
+
+                    self.T.to_sql(                  'alter table sub_stations add column geom geometry(Point,4326)')
+                    self.T.to_sql(                  "UPDATE sub_stations set geom = ST_SetSRID(ST_MakePoint(station_longitude,station_latitude),4326)")
+
+                    if not self.T.check_table_exists(self.T.PLUTO_TBL):
+                        print 'This function depends on NYC tax lot geometries (MapPLUTO) being available in pgSQL.'
+                        print 'Currently this is looking for table "%s"' % self.T.PLUTO_TBL
+                        print 'If no pluto table exists, run "import f_postgres as PG; pg=PG.pgSQL(); pg.Create.NYC.pluto();"'
+                        print 'Else, consider changing the target table variable at the top of this function'
+                        make_pluto = raw_input('\nRun the script to make pluto using table name: "%s" ? (y/n)\t' % self.T.PLUTO_TBL)
+                        if make_pluto=='y':
+                            self.T.pluto()
+                        else:
+                            raise SystemExit
+
+                    if remove_non_mn:
+                        # Remove subway stations that exist outside Manhattan
+                        #   (where Manhattan, here, is all convex hull of all geometries in %(PLUTO_TBL)s)
+                        self.T.to_sql(      """ DELETE FROM sub_stations
+                                                WHERE NOT st_within(geom, (
+                                                    SELECT ST_ConcaveHull(ST_Collect(f.the_geom),100,true) as geom
+                                                    FROM (
+                                                        SELECT *, (ST_Dump(geom)).geom as the_geom
+                                                        FROM %s
+                                                    ) As f
+                                                ))
+                                            """ % self.T.PLUTO_TBL)
+                        print 'removed non-Manhattan subway stations'
+                    return
+                def add_subway_stops(remove_non_mn=False):
+                    import zipfile, StringIO
+                    r                           =   self.T.requests.get('http://web.mta.info/developers/data/nyct/subway/google_transit.zip')
+                    z                           =   zipfile.ZipFile(StringIO.StringIO(r.content))
+                    sub_stops                   =   self.T.pd.read_csv(z.open('stops.txt'))
+                    self.T.to_sql(                  'drop table if exists sub_stops;')
+                    sub_stops.to_sql(               'sub_stops',self.T.eng,index=False)
+
+                    if not self.T.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                        self.T.to_sql(              """
+                                                    alter table sub_stops add column uid serial primary key;
+                                                    update sub_stops set uid = nextval(pg_get_serial_sequence('sub_stops','uid'));
+                                                    """)
+
+                    self.T.to_sql(                  """
+                                                    ALTER table sub_stops add column geom geometry(Point,4326);
+                                                    UPDATE sub_stops set geom = ST_SetSRID(ST_MakePoint(stop_lon,stop_lat),4326);
+                                                    """)
+                    if remove_non_mn:
+                        self.T.to_sql(      """
+                                            DELETE FROM sub_stops
+                                            WHERE NOT st_within(geom, (
+                                                SELECT ST_ConcaveHull(ST_Collect(f.the_geom),100,true) as geom
+                                                FROM (
+                                                    SELECT *, (ST_Dump(geom)).geom as the_geom
+                                                    FROM %s
+                                                ) As f
+                                            ));
+                                            """ % self.T.PLUTO_TBL)
+                        print 'removed non-Manhattan subway stops'
+                    return
+                def add_turnstile_key_info():
+                    ts_key                      =   self.T.pd.read_excel('http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls')
+                    ts_key.columns              =   [str(it).lower().replace(' ','_') for it in ts_key.columns.tolist()]
+                    ts_key['line_name']         =   ts_key['line_name'].map(lambda s: ''.join(sorted([str(it) for it in s])) if type(s)!=int else str(s))
+                    # ts_key['clean']             =   ts_key.station.map(lambda s: s.lower())
+                    self.T.to_sql(                  "drop table if exists ts_key")
+                    ts_key.to_sql(                  'ts_key',self.T.eng,index=False)
+                def get_data_fields_pre_change():
+                    fields_url                  =   'http://web.mta.info/developers/resources/nyct/turnstile/ts_Field_Description_pre-10-18-2014.txt'
+                    fields_info                 =   self.T.requests.get(fields_url).content.split('\n')
+                    for line in fields_info[1:]:
+                        if line:
+                            cols                =   line.split(',')
+                            break
+                    # cols                      =   ['C/A','UNIT','SCP','DATE1','TIME1','DESC1','ENTRIES1','EXITS1',
+                    #                                'DATE2','TIME2','DESC2','ENTRIES2','EXITS2','DATE3','TIME3','DESC3','ENTRIES3',
+                    #                                'EXITS3','DATE4','TIME4','DESC4','ENTRIES4','EXITS4','DATE5','TIME5','DESC5',
+                    #                                'ENTRIES5','EXITS5','DATE6','TIME6','DESC6','ENTRIES6',
+                    #                                'EXITS6','DATE7','TIME7','DESC7','ENTRIES7','EXITS7','DATE8',
+                    #                                'TIME8','DESC8','ENTRIES8','EXITS8']
+                    cols                        =   [str(it).lower().replace('/','_') for it in cols]
+                    return cols
+                def get_data_fields_post_change():
+                    fields_url                  =   'http://web.mta.info/developers/resources/nyct/turnstile/ts_Field_Description.txt'
+                    fields_info                 =   self.T.requests.get(fields_url).content.split('\n')
+                    for line in fields_info[1:]:
+                        if line:
+                            cols                =   line.split(',')
+                            break
+                    # cols                      =   ['c_a', 'unit', 'scp', 'station', 'linename', 'division',
+                    #                                'date', 'time', 'desc', 'entries', 'exits']
+                    cols                        =   [str(it).lower().replace('/','_') for it in cols]
+                    return cols
+                def get_data_links(link_type='latest'):
+                    url                     =   'http://web.mta.info/developers/turnstile.html'
+                    from bs4                    import BeautifulSoup
+                    req                     =   self.T.requests.get(url)
+                    html                    =   BeautifulSoup(req.content)
+                    base_url                =   req.url[:req.url.rfind('/')+1]
+
+                    file_links              =   html.find_all('h2',text='Data Files')[0].parent.find_all('a')
+                    if link_type=='latest':
+                        return                  base_url + file_links[0].get('href')
+                    elif link_type=='all':
+                        _dates              =   map(lambda d: self.T.DU.parse(d.contents[0]),file_links)
+                        _links              =   map(lambda d: base_url + d.get('href'),file_links)
+                        df                  =   self.T.pd.DataFrame(data={'links':_links,'dates':_dates})
+                        return                  df
+
+                # tkm = ts_key_min
+                def create_ts_key_min():
+                    q="""
+                        DROP TABLE IF EXISTS ts_key_min;
+                        CREATE TABLE ts_key_min AS ( SELECT * from ts_key );
+                        ALTER TABLE ts_key_min ADD COLUMN rk integer;
+                        WITH res AS (
+                            SELECT
+                                uid,station,line_name,division,
+                                ROW_NUMBER() OVER(PARTITION BY concat(station,line_name,division)
+                                                  ORDER BY uid ASC) AS rk
+                            FROM ts_key_min
+                            )
+                        UPDATE ts_key_min ts
+                        SET rk = s.rk
+                        FROM res s
+                        WHERE s.uid = ts.uid;
+
+                        -- minimalize ts_key_min
+                        DELETE FROM ts_key_min WHERE not rk=1;
+                        ALTER TABLE ts_key_min
+                            DROP COLUMN rk;
+
+                        -- redo uids (and reduce possible confusion)
+                        WITH upd as (
+                            SELECT uid,row_number() over() new_uid
+                            FROM ts_key_min
+                            )
+                        UPDATE ts_key_min ts
+                        SET uid = upd.new_uid
+                        FROM upd
+                        WHERE upd.uid = ts.uid;
+
+                        -- update ts_key
+                        ALTER TABLE ts_key ADD COLUMN ts_key_min_idx integer;
+                        UPDATE ts_key ts SET ts_key_min_idx=tsm.uid
+                        FROM ts_key_min tsm
+                        WHERE concat(ts.station,ts.line_name,ts.division) = concat(tsm.station,tsm.line_name,tsm.division);
+
+                    """
+
+                    self.T.to_sql(              q)
+                    q="""
+                        select a=b as _check
+                        from
+                        ( select count(*) a from ts_key_min ) f1,
+                        ( select count(distinct ts_key_min_idx) b from ts_key ) f2
+                    """
+                    assert self.T.pd.read_sql(q,self.T.eng)['_check'][0]==True
+                def update_stops_via_overlapping_station_geoms(add_col=False):
+                    t = '' if not add_col else 'ALTER TABLE sub_stops ADD COLUMN sub_station_idx integer;'
+                    q = """
+                        %s
+                        UPDATE sub_stops _stops SET sub_station_idx = _stations.uid
+                        FROM sub_stations _stations
+                        WHERE _stations.geom && _stops.geom;
+
+                        """ % t
+                    self.T.to_sql(q)
+                def update_stations_via_stops_idx_of_stations(add_col=False):
+                    t='' if not add_col else 'ALTER TABLE sub_stations ADD COLUMN sub_stop_idx integer;'
+                    q="""
+                        %s
+                        UPDATE sub_stations _stations SET sub_stop_idx = _stops.uid
+                        FROM
+                            (select uid,sub_station_idx from sub_stops
+                            where location_type=1 and sub_station_idx is not null) _stops
+                        WHERE  _stations.uid = _stops.sub_station_idx;
+                    """ % t
+                    self.T.to_sql(q)
+                def update_stations_via_stations_with_stops_idx():
+                    '''
+                    RE: sub_stations, stations sharing {division,line,station_name} are assumed to be the same station,
+                    and will be consolidated as so, and share the same sub_stop_idx (if any).
+                    '''
+                    q="""
+                        WITH upd AS (
+                            SELECT
+                                uid,division,line,station_name,sub_stop_idx,
+                                ROW_NUMBER() OVER(PARTITION BY concat(division,line,station_name)
+                                                  ORDER BY uid ASC) AS rk
+                            FROM sub_stations
+                            WHERE sub_stop_idx is not null
+                            )
+                        UPDATE sub_stations _st
+                        SET sub_stop_idx = s.sub_stop_idx
+                        FROM upd s
+                        WHERE concat(_st.division,_st.line,_st.station_name) = concat(s.division,s.line,s.station_name)
+                        AND _st.sub_stop_idx is null;
+                        """
+                    self.T.to_sql(q)
+                def update_stations_via_stations_overlapping_stops(and_within_meters=10):
+                    q="""
+                        UPDATE sub_stations _stats
+                        SET sub_stop_idx = _stops.uid
+                        FROM sub_stops _stops
+                        WHERE _stops.geom = _stats.geom
+                        AND _stats.sub_stop_idx IS NULL;
+                        """
+                    if and_within_meters:
+                        q+="""
+                            UPDATE sub_stations _stats
+                            SET sub_stop_idx = _stop.uid
+                            FROM
+                            (SELECT uid,geom FROM sub_stops WHERE location_type=1) _stop
+                            WHERE st_dwithin(_stats.geom::geography,_stop.geom::geography,10) --defaults to use_spheroid=true when ::geography; units are meters for WGS 84
+                            AND sub_stop_idx IS NULL
+                        """
+                    self.T.to_sql(q)
+                def update_stations_via_station_names_matching_stop_names():
+                    q="""
+                        UPDATE sub_stations _stats
+                        SET sub_stop_idx = _stops.uid
+                        FROM sub_stops _stops
+                        WHERE _stats.sub_stop_idx IS NULL
+                        AND _stops.location_type=1
+                        AND _stops.stop_name = _stats.station_name
+                    """
+                    self.T.to_sql(q)
+
+                def add_route_n_to_stations():
+                    q = """
+                        ALTER TABLE sub_stations ADD COLUMN route_n TEXT;
+                        UPDATE sub_stations _stations SET route_n = f.concat
+                        FROM (
+                                SELECT
+                                    concat(route_1::text,route_2::text,route_3::text,
+                                    route_4::text,route_5::text,route_6::text,
+                                    route_7::text,route_8::text,route_9::text,
+                                    route_10::text,route_11::text)::text,
+                                    uid
+                                FROM sub_stations
+                        ) f
+                        where f.uid=_stations.uid;
+
+
+                        --don't know how to do the below in pgSQL, and not worth figuring out for such a small use
+
+                        DO LANGUAGE plpythonu
+                        $BODY$
+
+                            qry = 'select uid,route_n from sub_stations'
+                            res = plpy.execute(qry)
+                            assert len(res)>0
+                            patch = ''
+                            for it in res:
+                                _sorted_rt = ''.join(sorted(it['route_n']))
+                                if not it['route_n'] == _sorted_rt:
+                                    patch+="UPDATE sub_stations SET route_n='%s' WHERE uid=%s;" % (_sorted_rt,it['uid'])
+                                    print patch
+                                    plpy.log(patch)
+
+                            if patch:
+                                plpy.execute(patch)
+
+                        $BODY$;
+                        """
+                    self.T.to_sql(q)
+                def update_tkm_with_stops_via_stations(add_col=False,with_regexp_matching=True):
+                    t='' if not add_col else 'ALTER TABLE ts_key_min ADD COLUMN sub_stop_idx integer;'
+                    q="""
+                        %s
+                        UPDATE ts_key_min tsm SET sub_stop_idx = _st.sub_stop_idx
+                        FROM
+                            sub_stations _st
+                        WHERE concat(_st.division,upper(_st.station_name),_st.route_n) =
+                        concat(tsm.division,tsm.station,tsm.line_name)
+                        and _st.sub_stop_idx is not null;
+                    """ % t
+                    if with_regexp_matching:
+                        q+= """
+                            -- regex for ts_key station name only
+                            UPDATE ts_key_min tsm
+                            SET sub_stop_idx = _st.sub_stop_idx
+                            FROM sub_stations _st
+                            WHERE concat(_st.division,_st.route_n,upper(_st.station_name)) =
+                            concat(tsm.division,tsm.line_name,regexp_replace(tsm.station,'^([^-]*)-(.*)$','\\1','g'))
+                            AND tsm.sub_stop_idx IS NULL;
+
+                            -- regex for both ts_key_min.station and sub_stations.station_name only
+                            UPDATE ts_key_min tsm
+                            SET sub_stop_idx = _st.sub_stop_idx
+                            FROM sub_stations _st
+                            WHERE concat(_st.division,_st.route_n,upper(regexp_replace(_st.station_name,'^([^-]*)-(.*)$','\\1','g'))) =
+                            concat(tsm.division,tsm.line_name,regexp_replace(tsm.station,'^([^-]*)-(.*)$','\\1','g'))
+                            AND tsm.sub_stop_idx IS NULL;
+                            """
+                    self.T.to_sql(q)
+                def update_stations_via_tkm_matching(add_col=False):
+                    t = '' if not add_col else 'ALTER TABLE sub_stations ADD COLUMN ts_key_min_idx integer;'
+                    q="""
+                        %s
+                        UPDATE sub_stations _st SET ts_key_min_idx = tsm.uid
+                        FROM ts_key_min tsm
+                        WHERE concat(_st.division,upper(_st.station_name),_st.route_n) =
+                        concat(tsm.division,tsm.station,tsm.line_name);
+
+                        """ % t
+                    self.T.to_sql(q)
+
+                def do_string_replacements(tbl,col):
+                    t = {'tbl':tbl,'col':col}
+                    patch = ''
+                    repl_dict                   =   {   r'(1st|first)'                          :   r'1',
+                                                        r'(2nd|second)'                         :   r'2',
+                                                        r'(3rd|third)'                          :   r'3',
+                                                        r'(4th|fourth)'                         :   r'4',
+                                                        r'(5th|fifth)'                          :   r'5',
+                                                        r'(6th|sixth)'                          :   r'6',
+                                                        r'(7th|seventh)'                        :   r'7',
+                                                        r'(8th|eigth)'                          :   r'8',
+                                                        r'(9th|nineth|ninth)'                   :   r'9',
+                                                        r'(0th)'                                :   r'0',
+                                                        r'(1th)'                                :   r'1',
+                                                        r'(2th)'                                :   r'2',
+                                                        r'(3th)'                                :   r'3',
+                                                        r'\s(street)'                           :   r' st',
+                                                        r'\s(square)'                           :   r' sq',
+                                                        r'\s(center)'                           :   r' ctr',
+                                                        r'\s(av)'                               :   r' ave',
+                                                        r'\Aunion sq'                           :   r'14 st-union sq',
+                                                        r'cathedral parkway-110 st'             :   r'110 st-cathedrl',
+                                                        r'163 st - amsterdam ave'               :   r'163 st-amsterdm',
+                                                        r'81 st - museum of natural history'    :   r'81 st-museum',
+                                                        r'47-50 sts rockefeller ctr'            :   r'47-50 st-rock',
+                                                        r'137 st-city college'                  :   r'137 st-city col',
+                                                        r'broadway-lafayette st'                :   r'broadway/lafay',
+                                                        r'west 4 st'                            :   r'w 4 st-wash sq' ,
+                                                        r'110 st-central park north'            :   r'110 st-cpn',
+                                                        r'116 st-columbia university'           :   r'116 st-columbia',
+                                                        r'168 st - washington heights'          :   r'168 st-broadway',
+                                                        r'49 st'                                :   r'49 st-7 ave',
+                                                        r'168 st\Z'                             :   r'168 st-broadway',
+                                                        r'59 st-columbus circle'                :   r'59 st-columbus',
+                                                        r'66 st-lincoln ctr'                    :   r'66 st-lincoln',
+                                                        r'68 st-hunter college'                 :   r'68st-hunter col',
+                                                        # r'astor pl'                             :   'astor place',
+                                                        r'brooklyn bridge-city hall'            :   r'brooklyn bridge',
+                                                        r'dyckman st-200 st'                    :   r'dyckman-200 st',
+                                                        r'grand central-42 st'                  :   r'42 st-grd cntrl',
+                                                        r'inwood - 207 st'                      :   r'inwood-207 st',
+                                                        r'lexington av-53 st'                   :   r'lexington-53 st',
+                                                        r'prince st'                            :   r"prince st-b''way",
+                                                        r'\Atimes sq\Z'                         :   r'42 st-times sq',
+                                                        r'times sq-42 st'                       :   r'42 st-times sq',
+                                                        r'van cortlandt park-242 st'            :   r'242 st',
+                                                        r'marble hill-225 st'                   :   r'225 st',
+                                                        r'lexington ave-53 st'                  :   r'lexington-53 st',
+                                                        r'harlem-148 st'                        :   r'148 st-lenox',
+                                                        r'\Agrand central\Z'                    :   r'42 st-grd cntrl',
+                                                        r'\Acanal st (ul)\Z'                    :   r'canal st',}
+                    for k,v in repl_dict.iteritems():
+                        t.update({'k':k,'v':v})
+                        patch+="UPDATE %(tbl)s SET %(col)s = regexp_replace(%(col)s,E'%(k)s',E'%(v)s','g'); " % t
+                    self.T.to_sql(patch)
+                def do_string_matching(idx_to_string,list_of_strings,tbl,list_of_cols):
+                    """
+                        select z_get_string_dist(
+                            idx             integer[],
+                            string_set      text[],
+                            compare_tbl     text,
+                            compare_col     text[],
+                            jaro            boolean default true,
+                            leven           boolean default true,
+                            nysiis          boolean default true,
+                            rating_codex    boolean default true,
+                            usps_repl_first boolean default true
+                            )
+                    """
+                    if not self.F.functions_exists('z_get_string_dist'):
+                        self.F.functions_create_z_get_string_dist()
+                    q="""
+                        SELECT f2.* --jaro_b matched_stations
+                        FROM
+                                (
+                                select (z).* from
+                                    (
+                                    select z_get_string_dist(       array%s,
+                                                                    array%s,
+                                                                    '%s'::text,
+                                                                    array%s ) z
+                                ) f1
+                            ) f2
+                        WHERE   f2.jaro > 0.66
+                        """ % (idx_to_string,
+                               [str(it) for it in list_of_strings],
+                               tbl,
+                               list_of_cols)
+
+                    return self.T.pd.read_sql(q,self.T.eng) #['matched_stations']
+
+
+                # i_trace()
+
+                # I. ADD GEOMETRIES TO DB
+                print 'adding turn stile geoms to DB'
+                # Add subway entrances/exits to map
+                add_station_geoms()
+
+                # Add subway stops to map
+                add_subway_stops()
+
+                # Add turn stile key/legend to DB
+                add_turnstile_key_info()
+
+                # II. ADD DATA TO DB
+
+                # Add turn stile data to DB
+                # --- Get Data Fields:
+                # cols                        =   get_data_fields_pre_change()
+                cols                        =   get_data_fields_post_change()
+
+                # --- Get Latest Data:
+                data_link                   =   get_data_links(link_type='latest')
+                datetime_cols               =   [ i for i in range(0,len(cols)) if cols[i].find('date')==0 or cols[i].find('time')==0 ]
+                # print 'about to start downloading and loading turn stile data.  This might take some time.'
+                # turn_stile_data             =   self.T.pd.read_csv(data_link,names=cols,skiprows=1,parse_dates=datetime_cols)
+                # print 'turn stile data downloaded.  %s rows about to be loaded into pgSQL.' % len(turn_stile_data)
+                # turn_stile_data.to_sql(         'turn_stiles',self.T.eng,index=False)
+                # print 'turn stile data loaded.  now harmonizing data inconsistencies.'
+
+                # REVIEW LATER
+                # Next 2 lines were used in pre_format_change analysis, not sure of the purpose
+                # idx                         =   p[p.unit.str.contains('R')==False].index
+                # p                           =   p.drop(idx,axis=0).reset_index(drop=True)
+
+                # Next group of lines also used in pre_format_change analysis, not sure of the purpose
+                # dropCols                    =   []
+                # for it in cols:
+                #     if it.find('exit')==0 or it.find('entries')==0:
+                #         p[it]               =   p[it].map(float)
+                #     if it.find('date')==0:
+                #         date_pt,time_pt,datetime_pt = it,'time'+it[4:],'datetime'+it[4:]
+                #         p[datetime_pt]      =   self.T.pd.to_datetime(p[date_pt] + ' ' + p[time_pt],format='%m-%d-%y %H:%M:%S',coerce=False)
+                #         p[datetime_pt]      =   p[datetime_pt].map(lambda s: None if str(s)=='NaT' else str(s))
+                #         dropCols.extend(        [date_pt,time_pt])
+                # p                           =   p.drop(dropCols,axis=1)
+                # cols                        =   p.columns.tolist()
+
+
+
+                # III. HARMONIZE DATA
+
+                # 1. Reduce `ts_key` to minimum --> `ts_key_min`;  Index `ts_key_min` on `ts_key`
+                create_ts_key_min()
+
+                '''
+                Because number(stations) >> number(stops),
+                stations are first matched up on "sub_stops".
+                STEP ONE:       fill sub_stops.sub_station_idx
+                STEP TWO:       fill sub_station.sub_stop_idx
+                STEP THREE:     fill ts_key_min
+
+                '''
+                do_string_replacements('ts_key_min','station')
+                do_string_replacements('sub_stations','station_name')
+                do_string_replacements('sub_stations','line')
+                do_string_replacements('sub_stops','stop_name')
+
+                #
+                update_stops_via_overlapping_station_geoms(add_col=True)
+                update_stations_via_stops_idx_of_stations(add_col=True)
+                update_stations_via_stations_with_stops_idx()
+                update_stations_via_stations_overlapping_stops()
+                update_stations_via_station_names_matching_stop_names()
+                update_stops_via_overlapping_station_geoms()
+                update_stations_via_stops_idx_of_stations()
+                update_stations_via_stations_with_stops_idx()
+                add_route_n_to_stations()
+                update_tkm_with_stops_via_stations(add_col=True)
+                update_stations_via_tkm_matching(add_col=True)
+
+
+
+                '''
+                RE: the two known errors below,
+                    ts_key_min value will replace sub_stations value,
+                        which will replace sub_stops value.
+                Then step #3 will be run again.
+
+                '''
+
+                def FIX_FOR_KNOWN_ERRORS():
+                    q="""
+
+                    UPDATE sub_stations _st SET station_name = '145 St'
+                    WHERE _st.station_name ~* '145';
+
+
+                    UPDATE sub_stations _st SET station_name = f1.station
+                    FROM
+                        (select station from ts_key_min tsm where tsm.station ~* 'w 4') f1
+                    WHERE _st.station_name ~* 'West 4';
+
+                    UPDATE sub_stops _st SET stop_name = f1.station
+                    FROM
+                        (select station from ts_key_min tsm where tsm.station ~* 'w 4') f1
+                    WHERE _st.stop_name ~* 'w 4';
+
+                    """
+                    self.T.to_sql(q)
+
+                FIX_FOR_KNOWN_ERRORS()
+
+
+
+                def RULE_1(station_name):
+                    '''
+                    RULE #1 -- (and RE: South Ferry)
+
+                    If single value exists for concat(division,line,station_name) in sub_stations,
+                        (which implies single value in sub_stops):
+                            -add sub_station_idx to, and copy sub_station coordinates onto, sub_stops
+                            -add sub_stop_idx to ts_key_min
+                            -add sub_stop_idx,ts_key_min_idx to sub_stations
+
+                    '''
+
+                    q="""
+                        select count(
+                            distinct concat(division,line,station_name)
+                            )=1 _check
+                        from sub_stations
+                        where station_name = '%s'
+                        """ % station_name
+                    assert self.T.pd.read_sql(q,self.T.eng)['_check'][0]==True
+                    q="""
+                        WITH upd as (
+                            UPDATE sub_stops _stops
+                            SET stop_lat = _stations.latitude,
+                                stop_lon = _stations.longitude,
+                                sub_station_idx = _stations.uid
+                            FROM sub_stations _stations
+                            WHERE _stops.stop_name ~* '%(X)s'
+                            and _stations.station_name ~* '%(X)s'
+                            RETURNING _stops.uid
+                        ),
+                        upd2 as (
+                            UPDATE ts_key_min tsm
+                            SET sub_stop_idx = u.uid
+                            FROM upd u
+                            WHERE station ~* '%(X)s'
+                            RETURNING tsm.uid
+                        )
+                        UPDATE sub_stations
+                        SET sub_stop_idx = u1.uid,
+                            ts_key_min_idx = u2.uid
+                        FROM upd u1,upd2 u2
+                        WHERE station_name ~* '%(X)s';
+                        """ % {'X':station_name}
+                    self.T.to_sql(q)
+
+                station_name = 'South Ferry'
+                RULE_1(station_name)
+
+
+
+                i_trace()
+
+                do_string_replacements('sub_stations','line')
+
+
+                # create table str_matching as (
+                # 0 (select uid ts_uid from ts_key_min where sub_stop_idx is null)
+                # 1 (select concat(division,line_name,station) from ts_key_min,(select ts_uid from str_matching)
+                # 1 (select concat(division,route_n,station_name) from sub_stations)
+                # 2 (select concat(division,route_n,line,station_name) from sub_stations)
+                # 3 (select concat(division,route_n,station_name,line) from sub_stations)
+                # 4 (select concat(division,route_n,_stops.stop_name) from sub_stations,
+                #   (   select uid,_stop_name
+                #       from sub_stops,(select array_agg(sub_stop_idx) all_sub_stop_idxs from sub_stations)
+                #       where array[uid] && all_sub_stop_idxs
+
+                # compare 0:1,0:2,0:3,0:4 with do_string_matching
+
+
+                do_string_matching()
 
                 # END GOAL conform 'station_names' to 'mn_stations'
-                mn_stations                 =   self.T.pd.read_sql("""select * from sub_stat_entr""",self.T.eng)
+                mn_stations                 =   self.T.pd.read_sql("select * from sub_stat_entr", self.T.eng)
 
                 # Limit NYC key to MN
                 mn_div_list                 =   mn_stations.division.unique().tolist()
@@ -6467,59 +7180,7 @@ class pgSQL_Tables:
                 # clean up many but small differences between station names
                 mn_stations['clean']        =   mn_stations.station_name.map(lambda s: s.lower())
                 # ts_key['clean']           =   ts_key.station.map(lambda s: s.lower())
-                repl_dict                   =   {   r'(1st|first)'          :r'1',
-                                                    r'(2nd|second)'         :r'2',
-                                                    r'(3rd|third)'          :r'3',
-                                                    r'(4th|fourth)'         :r'4',
-                                                    r'(5th|fifth)'          :r'5',
-                                                    r'(6th|sixth)'          :r'6',
-                                                    r'(7th|seventh)'        :r'7',
-                                                    r'(8th|eigth)'          :r'8',
-                                                    r'(9th|nineth|ninth)'   :r'9',
-                                                    r'(0th)'                :r'0',
-                                                    r'(1th)'                :r'1',
-                                                    r'(2th)'                :r'2',
-                                                    r'(3th)'                :r'3',
-                                                    r'\s(street)'           :r' st',
-                                                    r'\s(square)'           :r' sq',
-                                                    r'\s(center)'           :r' ctr',
-                                                    r'\s(av)'               :r' ave'}
-                for k,v in repl_dict.iteritems():
-                    mn_stations['clean']    =   mn_stations.clean.str.replace(k,v)
-
-                repl_dict                   =   {   r'\Aunion sq':r'14 st-union sq',
-                                                    r'cathedral parkway-110 st':r'110 st-cathedrl',
-                                                    r'163 st - amsterdam ave':r'163 st-amsterdm',
-                                                    r'81 st - museum of natural history':r'81 st-museum',
-                                                    r'47-50 sts rockefeller ctr':r'47-50 st-rock',
-                                                    r'137 st-city college':r'137 st-city col',
-                                                    r'broadway-lafayette st':r'broadway/lafay',
-                                                    r'west 4 st':r'w 4 st-wash sq' ,
-                                                    r'110 st-central park north':r'110 st-cpn',
-                                                    r'116 st-columbia university':r'116 st-columbia',
-                                                    r'168 st - washington heights':r'168 st-broadway',
-                                                    r'49 st':r'49 st-7 ave',
-                                                    r'168 st\Z':r'168 st-broadway',
-                                                    r'59 st-columbus circle':r'59 st-columbus',
-                                                    r'66 st-lincoln ctr':r'66 st-lincoln',
-                                                    r'68 st-hunter college':r'68st-hunter col',
-                                                    # r'astor pl':'astor place',
-                                                    r'brooklyn bridge-city hall':r'brooklyn bridge',
-                                                    r'dyckman st-200 st':r'dyckman-200 st',
-                                                    r'grand central-42 st':r'42 st-grd cntrl',
-                                                    r'inwood - 207 st':r'inwood-207 st',
-                                                    r'lexington av-53 st':r'lexington-53 st',
-                                                    r'prince st':r"prince st-b'way",
-                                                    r'\Atimes sq\Z':r'42 st-times sq',
-                                                    r'times sq-42 st':r'42 st-times sq',
-                                                    r'van cortlandt park-242 st':r'242 st',
-                                                    r'marble hill-225 st':r'225 st',
-                                                    r'lexington ave-53 st':r'lexington-53 st',
-                                                    r'harlem-148 st':r'148 st-lenox',
-                                                    r'\Agrand central\Z':r'42 st-grd cntrl',
-                                                    r'\Acanal st (ul)\Z':r'canal st',}
-                for k,v in repl_dict.iteritems():
-                    mn_stations['clean']    =   mn_stations.clean.str.replace(k,v)
+                do_string_replacements()
 
                 station_names               =   ts_key.clean.tolist()
                 #print len(mn_stations[mn_stations.clean.isin(station_names)==False]), 'stations not mapped'
@@ -6847,6 +7508,43 @@ class pgSQL_Tables:
                 self.T.pd.read_sql(             cmd,self.T.eng)#.drop(dropCols,axis=1)
 
 
+class pgSQL_Types:
+
+    def __init__(self,_parent):
+        self                                =   _parent.T.To_Sub_Classes(self,_parent)
+
+    def exists(self,type_name):
+        qry                                 =   """ SELECT EXISTS (SELECT 1
+                                                    FROM pg_type
+                                                    WHERE typname = '%s')
+                                                """ % type_name
+        return                                  self.T.pd.read_sql(qry,self.T.eng).exists[0]
+
+    class Create:
+
+        def __init__(self,_parent):
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
+
+        def string_dist_results(self):
+            qry="""
+                DROP TYPE IF EXISTS string_dist_results cascade;
+                CREATE TYPE string_dist_results as (
+                    idx integer,
+                    orig_str text,
+                    jaro double precision,
+                    jaro_b text,
+                    leven integer,
+                    leven_b text,
+                    nysiis text,
+                    rating_codex text
+                );
+            """
+            self.T.to_sql(                  qry)
+
+    class Destroy:
+
+        def __init__(self,_parent):
+            self                            =   _parent.T.To_Sub_Classes(self,_parent)
 
 class pgSQL:
 
@@ -6887,6 +7585,7 @@ class pgSQL:
 
 
         import                                  datetime                as dt
+        from dateutil                           import parser           as DU               # e.g., DU.parse('some date as str') --> obj(datetime.datetime)
         from time                               import sleep
         from urllib                             import quote_plus,unquote
         from re                                 import findall          as re_findall
@@ -6901,8 +7600,9 @@ class pgSQL:
         from uuid                               import uuid4            as get_guid
         import                                  requests
         from f_geolocation                      import Addr_Parsing,Geocoding
-        from routing_settings                   import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
-        from py_classes                         import To_Class,To_Sub_Classes
+        from db_settings                        import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
+        from db_settings                        import PLUTO_TBL
+        from py_classes_link                    import To_Sub_Classes,To_Class,To_Class_Dict
         import                                  pandas                  as pd
         pd.set_option(                          'expand_frame_repr', False)
         pd.set_option(                          'display.max_columns', None)
@@ -6914,9 +7614,8 @@ class pgSQL:
         np.set_printoptions(                    linewidth=1500,threshold=np.nan)
         import                                  geopandas               as gd
         from sqlalchemy                         import create_engine
-        from logging                            import getLogger
-        from logging                            import INFO             as logging_info
-        getLogger(                              'sqlalchemy.dialects.postgresql').setLevel(logging_info)
+        import logging
+        logging.getLogger(                      'sqlalchemy.dialects.postgresql').setLevel(logging.INFO)
         eng                                 =   create_engine(r'postgresql://%s:%s@%s:%s/%s'
                                                           %(DB_USER,DB_PW,DB_HOST,DB_PORT,DB_NAME),
                                                           encoding='utf-8',
@@ -6930,12 +7629,10 @@ class pgSQL:
 
         D                                   =   {'guid'                 :   str(get_guid().hex)[:7]}
         D.update(                               {'tmp_tbl'              :   'tmp_'+D['guid']})
-        self.T                              =   To_Class(D)
-        all_imports                         =   locals().keys() #+ globals().keys()
-        for k in all_imports:
-            if not k=='D' and not k=='self':
-                self.T.update(                  {k                      :   eval(k) })
-        globals().update(                       self.T.__getdict__())
+
+        self.T                              =   To_Class_Dict(  self,
+                                                                dict_list=[D,locals()],
+                                                                update_globals=True)
 
         ## Don't think these are needed anymore...
         # from f_geolocation import get_bldg_street_idx
@@ -6946,9 +7643,14 @@ class pgSQL:
         self.Functions                      =   pgSQL_Functions(self)
         self.Triggers                       =   pgSQL_Triggers(self)
         self.Tables                         =   pgSQL_Tables(self)
+        self.__initial_check__()
 
-
-
+    def __initial_check__(self):
+        # Confirm that geometry is enabled
+        try:
+            self.T.to_sql('select geometry(Point,4326);')
+        except:
+            self.F.functions_run_confirm_extensions()
 
 
 
