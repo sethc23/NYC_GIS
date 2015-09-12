@@ -1726,15 +1726,10 @@ class pgSQL_Functions:
                 -- to_log(                         "common = "..common, verbose)
 
                 -- count transpositions
-
-
-                --for i=1, #a do
-                local trans_count = 0
+                local first,k,trans_count   =   true,1,0
                 local _j
-                local first,k  =   true,1
                 for _i,v in ipairs(a_tbl) do
                     i = _i - 1
-
 
                     if a_flags[i+1] then
 
@@ -1748,6 +1743,7 @@ class pgSQL_Functions:
                                 k = j+1
                                 break
                             end
+
                         end
 
                         --to_log(                 "k= "..k, verbose)
@@ -1777,32 +1773,43 @@ class pgSQL_Functions:
                 to_log(                         "weight = "..weight, verbose)
 
                 -- winkler modification: continue to boost if strings are similar
+                local i,_i,j               =   0,0
                 if winklerize and weight>0.7 and #a>3 and #b>3 then
 
                     -- adjust for up to first 4 chars in common
-                    local i,j               =   0,0
-                    if match_dist<4 then        j=match_dist else j=4 end
 
-                    for i=1, j-1 do
-                        if a_tbl[i]==b_tbl[i] and #a<=i then
-                            i               =   i+1
+                    if #a<4 then                j = #a
+                    else                        j = 4 end
+                    --to_log(            "i,j_1= "..i..","..j, verbose)
+
+                    for _i=1, j-1 do
+                        if _i==1 then           i = _i-1 end
+                        if a_tbl[_i]==b_tbl[_i] and #b>=_i then
+                            if not i then       i = 1
+                            else                i = i+1 end
+                            --to_log(           "i,_i,j_2= "..i..",".._i..","..j, verbose)
                         end
+                        if i>j then             break end
                     end
+                    --to_log(            "i,_i,j_3= "..i..",".._i..","..j, verbose)
 
-                    if i>0 then
+                    if i-1>0 then
+                        i = i-1
                         weight              =   weight + ( i * 0.1 * (1.0 - weight) )
                     end
+                    to_log(                     "new weight_1 = "..weight, verbose)
 
                     -- optionally adjust for long strings
                     -- after agreeing beginning chars, at least two or more must agree and
                     -- agreed characters must be > half of remaining characters
                     if ( long_tolerance and
-                         match_dist>4 and
+                         #a>4 and
                          common>i+1 and
-                         2*common>=match_dist+i ) then
-                        weight              =   weight + ((1.0 - weight) * ( (common-i-1) / float(#a+#b-i*2+2)))
+                         2*common>=#a+i ) then
+                        weight              =   weight + ((1.0 - weight) * ( (common-i-1) / (#a+#b-i*2+2)))
                     end
-                    to_log(                     "new weight = "..weight, verbose)
+
+                    to_log(                     "new weight_2 = "..weight, verbose)
 
                 end
 
