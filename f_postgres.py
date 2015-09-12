@@ -1603,9 +1603,9 @@ class pgSQL_Functions:
                 DROP FUNCTION IF EXISTS         z_str_comp_jaro(text,text,boolean,boolean,boolean);
                 CREATE OR REPLACE FUNCTION      z_str_comp_jaro(s1              text,
                                                                 s2              text,
-                                                                verbose         boolean default true,
                                                                 winklerize      boolean default true,
-                                                                long_tolerance  boolean default true)
+                                                                long_tolerance  boolean default true,
+                                                                verbose         boolean default false)
                 RETURNS                         double precision
                 AS $BODY$
 
@@ -1620,13 +1620,7 @@ class pgSQL_Functions:
                         local cjson         =   require "cjson"
                         res                 =   cjson.encode(tbl)
                     else
-                        local _str          =   "["
-                        for i,v in ipairs(tbl) do
-                            _str            =   _str.."'"..v.."', "
-                        end
-                        _str                =   _str.."]"
-                        _str                =   _str.gsub("^(.*)(, )(%])$","%1%3")
-                        res                 =   _str
+                        res                 =   " "
                     end
                     return res
                 end
@@ -1646,12 +1640,12 @@ class pgSQL_Functions:
                 if #s1<#s2 then     b,a     =   s1,s2
                 else                a,b     =   s1,s2   end
                 a,b                         =   a:upper(),b:upper()
-                --to_log(                         "a: "..a, verbose)
+                to_log(                         "a: "..a, verbose)
 
                 -- define max distance where character will be considered matching (despite tranposition)
                 local match_dist            =   round( (#a/2) - 1 )
                 if match_dist<0 then            match_dist=0 end
-                -- to_log(                         "match_dist="..match_dist, verbose)
+                to_log(                         "match_dist="..match_dist, verbose)
 
                 -- create letter and flags tables
                 local a_tbl,b_tbl           =   {},{}
@@ -1667,9 +1661,9 @@ class pgSQL_Functions:
                     table.insert(               b_tbl,b:sub(i,i))
                     table.insert(               b_flags,false)
                 end
-                -- to_log(                         "a_tbl "..cjson_encode(a_tbl, verbose) , verbose)
-                -- to_log(                         "b_tbl "..cjson_encode(b_tbl, verbose) , verbose)
-                -- to_log(                         "b_tbl[3] "..b_tbl[3] , verbose)
+                to_log(                         "a_tbl "..cjson_encode(a_tbl, verbose) , verbose)
+                to_log(                         "b_tbl "..cjson_encode(b_tbl, verbose) , verbose)
+                to_log(                         "b_tbl[3] "..b_tbl[3] , verbose)
 
                 -- verify tables are proper length
                 if (not #a==#a_tbl==#a_flags) or (not #b==#b_tbl==#b_flags) then
@@ -1677,40 +1671,36 @@ class pgSQL_Functions:
                 end
 
                 -- looking only within the match distance, count & flag matched pairs
-                local low,hi,common  =   0,0,0
+                local low,hi,common         =   0,0,0
                 local i
                 for _i,v in ipairs(a_tbl) do
                     i = _i-1
 
                     local cursor            =   v
-                    --to_log(                     "cursor_1="..cursor, verbose)
+                    to_log(                     "cursor_1="..cursor, verbose)
 
                     if i>match_dist then
                         low                 =   i-match_dist
-                        --to_log("low: this NOT happen", verbose)
                     else
-                        --to_log("low: this happens", verbose)
                         low                 =   0
                     end
                     if i+match_dist<=#b then
-                        --to_log("hi: this happens", verbose)
                         hi                  =   i+match_dist
                     else
-                        --to_log("hi: this NOT happen", verbose)
                         hi                  =   #b
                     end
 
-                    --to_log(                     "low_hi "..low.." "..hi, verbose)
+                    to_log(                     "low_hi "..low.." "..hi, verbose)
 
                     for _j=low+1, hi+1 do
                         j                   =   _j-1
 
-                        --to_log(                 "ij "..i.." "..j, verbose)
-                        --to_log(                 "cursor "..cursor, verbose)
-                        --to_log(                 "b_tbl[j+1] "..b_tbl[j+1], verbose)
+                        to_log(                 "ij "..i.." "..j, verbose)
+                        to_log(                 "cursor "..cursor, verbose)
+                        to_log(                 "b_tbl[j+1] "..b_tbl[j+1], verbose)
 
                         if not b_flags[j+1] and b_tbl[j+1]==cursor then
-                            --to_log(             "BROKEN", verbose)
+                            to_log(             "BREAK_HERE", verbose)
                             a_flags[i+1]    =   true
                             b_flags[j+1]    =   true
                             common          =   common+1
@@ -1718,36 +1708,35 @@ class pgSQL_Functions:
                         end
                     end
                 end
-                -- to_log(                         "a_flags="..cjson_encode(a_flags, verbose) , verbose)
-                -- to_log(                         "b_flags="..cjson_encode(b_flags, verbose) , verbose)
+                to_log(                         "a_flags="..cjson_encode(a_flags, verbose) , verbose)
+                to_log(                         "b_flags="..cjson_encode(b_flags, verbose) , verbose)
 
                 -- return nil if no exact or transpositional matches
                 if common==0 then               return nil end
-                -- to_log(                         "common = "..common, verbose)
+                to_log(                         "common = "..common, verbose)
 
                 -- count transpositions
                 local first,k,trans_count   =   true,1,0
                 local _j
                 for _i,v in ipairs(a_tbl) do
-                    i = _i - 1
+                    i                       =   _i - 1
 
                     if a_flags[i+1] then
 
                         for j=k, #b do
-                            _j = j - 1
+                            _j              =   j - 1
 
-                            --to_log(            "i,j,_j= "..i..","..j..",".._j, verbose)
-                            --to_log(            "b_flags[j]= "..cjson_encode({b_flags[j]}, verbose) , verbose)
+                            to_log(            "i,j,_j= "..i..","..j..",".._j, verbose)
+                            to_log(            "b_flags[j]= "..cjson_encode({b_flags[j]}, verbose) , verbose)
 
                             if b_flags[j] then
-                                k = j+1
+                                k           =   j+1
                                 break
                             end
-
                         end
 
-                        --to_log(                 "k= "..k, verbose)
-                        --to_log(                 "a_tbl[i+1]= "..a_tbl[i+1], verbose)
+                        to_log(                 "k= "..k, verbose)
+                        to_log(                 "a_tbl[i+1]= "..a_tbl[i+1], verbose)
 
                         if not j and first then
                             _j,first        =   1,false
@@ -1755,10 +1744,13 @@ class pgSQL_Functions:
                             _j              =   _j + 1
                         end
 
-                        --to_log(                 "b_tbl[_j]= "..b_tbl[_j], verbose)
+                        to_log(                 "b_tbl[_j]= "..b_tbl[_j], verbose)
                         if a_tbl[i+1]~=b_tbl[_j] then
-                            if (not trans_count or trans_count==0) then trans_count = 1
-                            else trans_count = trans_count+1 end
+                            if (not trans_count or trans_count==0) then
+                                trans_count =   1
+                            else
+                                trans_count =   trans_count+1
+                            end
                         end
 
                     end
@@ -1773,25 +1765,25 @@ class pgSQL_Functions:
                 to_log(                         "weight = "..weight, verbose)
 
                 -- winkler modification: continue to boost if strings are similar
-                local i,_i,j               =   0,0
+                local i,_i,j                =   0,0,0
                 if winklerize and weight>0.7 and #a>3 and #b>3 then
 
                     -- adjust for up to first 4 chars in common
 
                     if #a<4 then                j = #a
                     else                        j = 4 end
-                    --to_log(            "i,j_1= "..i..","..j, verbose)
+                    to_log(                     "i,j_1= "..i..","..j, verbose)
 
                     for _i=1, j-1 do
                         if _i==1 then           i = _i-1 end
                         if a_tbl[_i]==b_tbl[_i] and #b>=_i then
                             if not i then       i = 1
                             else                i = i+1 end
-                            --to_log(           "i,_i,j_2= "..i..",".._i..","..j, verbose)
+                            to_log(             "i,_i,j_2= "..i..",".._i..","..j, verbose)
                         end
                         if i>j then             break end
                     end
-                    --to_log(            "i,_i,j_3= "..i..",".._i..","..j, verbose)
+                    to_log(                     "i,_i,j_3= "..i..",".._i..","..j, verbose)
 
                     if i-1>0 then
                         i = i-1
