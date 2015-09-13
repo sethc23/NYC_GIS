@@ -6,6 +6,6 @@ ogr2osm/
 USPS/
 data_importing_notes.md
 f_postgres.bak
-routing_settings.py
+db_settings.py
 __init__.py
 py_classes_link.py

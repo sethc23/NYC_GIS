@@ -577,7 +577,7 @@ class GeoLibrary:
         pd.set_option(                          'display.colheader_justify','left')
         np                                  =   pd.np
         np.set_printoptions(                    linewidth=1500,threshold=np.nan)
-        from routing_settings                   import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
+        from db_settings                        import DB_NAME,DB_HOST,DB_PORT,DB_USER,DB_PW
         from sqlalchemy                         import create_engine
         from logging                            import getLogger
         from logging                            import INFO             as logging_info
