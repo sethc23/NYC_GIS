@@ -1,1 +1,3 @@
 *.pyc
+db_settings.py
+py_classes_link.py
