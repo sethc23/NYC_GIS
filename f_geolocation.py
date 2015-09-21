@@ -17,7 +17,7 @@ class Geocoding:
         from pygeocoder                         import Geocoder  # sudo port select python python26
         self.T.update(                          {'Geocoder'           :   Geocoder })
 
-        globals().update(                        self.T.__getdict__())
+        globals().update(                        self.T.__dict__)
         # generally             --
         # java version          -- https://developers.google.com/maps/documentation/javascript/geocoding
         # java limits           -- https://developers.google.com/maps/documentation/geocoding/#Limits
@@ -246,7 +246,7 @@ class Addr_Parsing:
         for it in dir(self):
             if getattr(self,it).__class__.__name__=='instancemethod' and it[0]!='_':
                 self.T.update(                  { it                    :   getattr(self,it) } )
-        globals().update(                        self.T.__getdict__())
+        globals().update(                        self.T.__dict__)
 
     def find_addr_idx_matches(self,addr_list):
         cmd = ('select * from addr_idx '+
@@ -592,7 +592,7 @@ class GeoLibrary:
         for k in all_imports:
             if not k=='D' and not k=='self':
                 self.T.update(                  {k                      :   eval(k) })
-        globals().update(                       self.T.__getdict__())
+        globals().update(                       self.T.__dict__)
 
         self.ST_Parts                       =   ST_Parts()
         self.Addr_Parsing                   =   Addr_Parsing(self.T)

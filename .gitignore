@@ -1,11 +1,1 @@
-address_standardizer/
-NYC
 *.pyc
-shape2osm/
-ogr2osm/
-USPS/
-data_importing_notes.md
-f_postgres.bak
-db_settings.py
-__init__.py
-py_classes_link.py

@@ -23,7 +23,7 @@ class NYC_Data:
         for it in dir(self):
             if getattr(self,it).__class__.__name__=='instancemethod' and it[0]!='_':
                 self.T.update(                  { it                    :   getattr(self,it) } )
-        globals().update(                        self.T.__getdict__())
+        globals().update(                        self.T.__dict__)
 
     def __load_libs__(self):
         from f_geolocation                      import GeoLibrary

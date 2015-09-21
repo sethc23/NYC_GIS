@@ -66,7 +66,7 @@ class pgSQL_Functions:
             res                         =   self.T.pd.read_sql(cmd,self.T.eng).res
             return res
 
-        def confirm_extensions(self):
+        def confirm_extensions(self,verbose=False):
             qry =   """
                     CREATE EXTENSION IF NOT EXISTS plpythonu;
                     CREATE EXTENSION IF NOT EXISTS pllua;
@@ -76,18 +76,27 @@ class pgSQL_Functions:
                     --CREATE EXTENSION IF NOT EXISTS postgis_tiger_geocoder;
                     --CREATE EXTENSION IF NOT EXISTS pgrouting;
                     """
-            self.T.to_sql(qry)
-            print 'Extensions Confirmed'
-            if not self.F.triggers_exists_event_trigger('missing_primary_key_trigger'):
-                idx_trig = raw_input('add trigger to automatically create column "uid" as index col if table created without index column? (y/n)\t')
-                if idx_trig=='y':
-                    self.F.triggers_create_z_auto_add_primary_key()
-            if not self.F.triggers_exists_event_trigger('missing_last_updated_field'):
-                modified_trig = raw_input('add trigger to automatically create column "last_updated" for all new tables and update col/row when row modified? (y/n)\t')
-                if modified_trig=='y':
-                    self.F.triggers_create_z_auto_add_last_updated_field()
-                    #### self.F.triggers_create_z_auto_update_timestamp()
+            self.T.to_sql(                      qry)
+            if verbose:                         print 'Extensions Confirmed'
             return
+
+        def reset_index(self,table_name,uid_col,sort_by=''):
+            qry="""
+                ALTER TABLE %(tbl)s ADD COLUMN new_%(uid_col)s INTEGER;
+                WITH upd as (
+                    SELECT %(uid_col)s,row_number() over() new_%(uid_col)s
+                    FROM %(tbl)s
+                    ORDER BY %(sort_by)s
+                    )
+                UPDATE %(tbl)s _s
+                SET new_%(uid_col)s = upd.new_uid
+                FROM upd
+                WHERE upd.%(uid_col)s = _s.%(uid_col)s;
+                ALTER TABLE %(tbl)s ALTER COLUMN %(uid_col)s TYPE INTEGER USING new_%(uid_col)s;
+                ALTER TABLE %(tbl)s DROP COLUMN new_%(uid_col)s;
+
+            """ % {'tbl':table_name,'uid_col':uid_col,'sort_by':sort_by}
+            self.T.to_sql(qry)
 
     class Create:
 
@@ -181,9 +190,8 @@ class pgSQL_Functions:
                     $$
                     LANGUAGE plpgsql
                 """
-            self.T.conn.set_isolation_level(       0)
-            self.T.cur.execute(                    cmd)
-            self.T.z_next_free(                 )
+            self.T.to_sql(                      cmd)
+            self.F.functions_create_z_next_free()
         def z_next_free(self):
             self.F.functions_run_confirm_extensions()
             cmd="""
@@ -196,8 +204,9 @@ class pgSQL_Functions:
                                                         _seq text)
                 RETURNS integer AS
                 $BODY$
-                stop=False
-                T = {'tbl':table_name,'uid_col':uid_col,'_seq':_seq}
+                stop                        =   False
+                T                           =   {'tbl':table_name,'uid_col':uid_col,'_seq':_seq}
+
                 # p = \"\"\"
                 #
                 #         SELECT _tbl_cnt,_seq_cnt
@@ -218,58 +227,103 @@ class pgSQL_Functions:
                 # if tbl and seq:
                 #     p = "alter table %(tbl)s alter column %(uid_col)s set DEFAULT z_next_free('%(tbl)s'::text, 'uid'::text, '%(tbl)s_uid_seq'::text);"%T
                 #     t = plpy.execute(p)
-                p = \"\"\"
 
-                            select count(column_name) c
-                            from INFORMATION_SCHEMA.COLUMNS
-                            where table_name = '%(tbl)s'
-                            and column_name = '%(uid_col)s';
+                # Check if table %(tbl)s exists with uid col %(uid_col)s
+                p                           =   \"\"\"
+                                                WITH tbl_res as (
+                                                    SELECT table_name
+                                                    FROM INFORMATION_SCHEMA.COLUMNS
+                                                    WHERE table_name = '%(tbl)s'
+                                                    AND column_name = '%(uid_col)s'
+                                                    )
+                                                SELECT EXISTS (
+                                                    SELECT 1
+                                                    FROM tbl_res _res,pg_class _cl
+                                                    INNER JOIN pg_attribute _attr   ON _cl.oid = _attr.attrelid
+                                                    INNER JOIN pg_index _idx        ON _cl.oid = _idx.indrelid
+                                                    WHERE   _cl.oid = _attr.attrelid
+                                                    AND     _cl.oid = _idx.indrelid
+                                                    AND     _idx.indkey[0] = _attr.attnum
+                                                    AND     _idx.indisprimary = 't'
+                                                    AND     _res.table_name = _cl.relname
+                                                )
+                                                \"\"\" % T
+                tbl_col_as_uid_exists       =   plpy.execute(p)[0]['exists']
+                #plpy.log(                       "table and col as uid chk: %s" % tbl_col_as_uid_exists)
 
-                    \"\"\" % T
-                cnt = plpy.execute(p)[0]['c']
+                seq_exists = plpy.execute("SELECT EXISTS (SELECT 1 FROM pg_class where relname = '%(tbl)s_%(uid_col)s_seq' )"%T)[0]['exists']
+                #plpy.log(                       "sequence chk: %s" % seq_exists)
 
-                if cnt==0:
-                    p = "create sequence %(tbl)s_%(uid_col)s_seq start with 1;"%T
+                if tbl_col_as_uid_exists and seq_exists:
+                    next_val = plpy.execute(    "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T)[0]['next_val']
+                    #plpy.log(                   "next_val chk: %s" % next_val)
+                    return next_val
+
+
+
+                # If table being contemporaneously created
+                if not tbl_col_as_uid_exists:
+                    p = "CREATE SEQUENCE %(tbl)s_%(uid_col)s_seq START WITH 0;"%T
                     t = plpy.execute(p)
-                    p = "alter table %(tbl)s alter column %(uid_col)s set DEFAULT z_next_free('%(tbl)s'::text, 'uid'::text, '%(tbl)s_uid_seq'::text);"%T
+                    p = "ALTER TABLE %(tbl)s ALTER COLUMN %(uid_col)s SET DEFAULT z_next_free('%(tbl)s'::text, 'uid'::text, '%(tbl)s_uid_seq'::text);"%T
                     t = plpy.execute(p)
-                stop=False
+                    T['next_val'] = 1
+                    stop = True
+
                 while stop==False:
-                    p = "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T
+                    p                       =   "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T
                     try:
-                        t = plpy.execute(p)[0]['next_val']
+                        t                   =   plpy.execute(p)[0]['next_val']
+
                     except plpy.spiexceptions.UndefinedTable:
-                        p = "select max(%(uid_col)s) from %(tbl)s;" % T
+                        p                   =   "SELECT max(%(uid_col)s) FROM %(tbl)s;" % T
+
                         try:
-                            max_num = plpy.execute(p)[0]['max']
+                            max_num         =   plpy.execute(p)[0]['max']
                             if max_num:
-                                T.update({'max_num':str(max_num)})
+                                T.update(       {'max_num':str(max_num)})
                             else:
-                                T.update({'max_num':str(1)})
+                                T.update(       {'max_num':str(1)})
+
                         except plpy.spiexceptions.UndefinedTable:
-                            T.update({'max_num':str(1)})
-                        p = "create sequence %(tbl)s_%(uid_col)s_seq start with %(max_num)s;" % T
-                        t = plpy.execute(p)
-                        p = "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T
-                        t = plpy.execute(p)[0]['next_val']
-                    T.update({'next_val':t})
+                            T.update(           {'max_num':str(1)})
+
+                        except:
+                            plpy.log(           "unknown exception in f(x) z_next_free")
+                            T.update(           {'max_num':str(1)})
+
+                        p                   =   "CREATE SEQUENCE %(tbl)s_%(uid_col)s_seq START WITH %(max_num)s;" % T
+                        t                   =   plpy.execute(p)
+                        p                   =   "SELECT nextval('%(tbl)s_%(uid_col)s_seq') next_val"%T
+                        t                   =   plpy.execute(p)[0]['next_val']
+
+                    T.update(                   {'next_val':t})
+                    if T.has_key('max_num') and T['max_num']=='1':
+                        stop                =   True
+                        break
+
                     # if tbl:
-                    #     p = "SELECT count(%(uid_col)s) cnt from %(tbl)s where %(uid_col)s=%(next_val)s"%T
+                    #     p = "SELECT COUNT(%(uid_col)s) cnt FROM %(tbl)s WHERE %(uid_col)s=%(next_val)s"%T
                     #     chk = plpy.execute(p)[0]['cnt']
                     # if not tbl or not chk:
                     #     stop=True
                     #     break
-                    p = "SELECT count(%(uid_col)s) cnt from %(tbl)s where %(uid_col)s=%(next_val)s"%T
-                    chk = plpy.execute(p)[0]['cnt']
-                    if chk==0:
-                        stop=True
+
+                    plpy.log(                   "Showing dict: ")
+                    plpy.log(                   T)
+                    all = plpy.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='%(tbl)s')" % T)
+                    plpy.log(all)
+                    if all[0]['exists']:
+                        cols = plpy.execute("SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='%(tbl)s')" % T)
+                    p                       =   "SELECT EXISTS( SELECT 1 FROM %(tbl)s WHERE %(uid_col)s=%(next_val)s ) _exists;"%T
+                    if not plpy.execute(p)[0]['_exists']:
+                        stop                =   True
                         break
                 return T['next_val']
                 $BODY$
                 LANGUAGE plpythonu;
             """
-            self.T.conn.set_isolation_level(       0)
-            self.T.cur.execute(                    cmd)
+            self.T.to_sql(                    cmd)
             print 'Added: f(x) z_next_free'
         def z_get_way_between_ways(self):
             cmd="""CREATE OR REPLACE FUNCTION
@@ -1600,217 +1654,66 @@ class pgSQL_Functions:
             return
         def z_str_comp_jaro(self):
             cmd="""
-                DROP FUNCTION IF EXISTS         z_str_comp_jaro(text,text,boolean,boolean,boolean);
+
+                DROP FUNCTION IF EXISTS         z_str_comp_jaro(text,text,boolean,boolean,boolean,boolean);
                 CREATE OR REPLACE FUNCTION      z_str_comp_jaro(s1              text,
                                                                 s2              text,
-                                                                winklerize      boolean default true,
-                                                                long_tolerance  boolean default true,
-                                                                verbose         boolean default false)
+                                                                winklerize      boolean DEFAULT true,
+                                                                long_tolerance  boolean DEFAULT true,
+                                                                verbose         boolean DEFAULT false,
+                                                                reload_module   boolean DEFAULT false)
                 RETURNS                         double precision
                 AS $BODY$
 
+                local t                     =   ""
+                if reload_module then package.loaded.string_matching = nil end
+                local str_m                 =   require "string_matching"
+                t                           =   str_m.jaro_score(s1,s2,winklerize,long_tolerance,verbose)
 
-                function round (n)
-                    return math.floor((math.floor(n*2) + 1)/2)
-                end
-
-                function cjson_encode (tbl, verbose)
-                    local res
-                    if verbose then
-                        local cjson         =   require "cjson"
-                        res                 =   cjson.encode(tbl)
-                    else
-                        res                 =   " "
-                    end
-                    return res
-                end
-
-                function to_log (msg, verbose)
-                    if verbose then             log(msg) end
-                end
-                to_log(                         "NEW EXECUTION\\n\\n", verbose)
+                return t
 
 
-                if #s1==0 or #s2==0 then
-                    log(                        "s1 or s2 has no length!")
-                end
-
-                -- set #a>#b
-                local a,b,m                 =   "","",0
-                if #s1<#s2 then     b,a     =   s1,s2
-                else                a,b     =   s1,s2   end
-                a,b                         =   a:upper(),b:upper()
-                to_log(                         "a: "..a, verbose)
-
-                -- define max distance where character will be considered matching (despite tranposition)
-                local match_dist            =   round( (#a/2) - 1 )
-                if match_dist<0 then            match_dist=0 end
-                to_log(                         "match_dist="..match_dist, verbose)
-
-                -- create letter and flags tables
-                local a_tbl,b_tbl           =   {},{}
-                local a_flags,b_flags       =   {},{}
-                for i=1,#a do
-                    table.insert(               a_tbl,a:sub(i,i))
-                    table.insert(               a_flags,false)
-
-                    table.insert(               b_tbl,b:sub(i,i))
-                    table.insert(               b_flags,false)
-                end
-                for i=#a+1, #b do
-                    table.insert(               b_tbl,b:sub(i,i))
-                    table.insert(               b_flags,false)
-                end
-                to_log(                         "a_tbl "..cjson_encode(a_tbl, verbose) , verbose)
-                to_log(                         "b_tbl "..cjson_encode(b_tbl, verbose) , verbose)
-                to_log(                         "b_tbl[3] "..b_tbl[3] , verbose)
-
-                -- verify tables are proper length
-                if (not #a==#a_tbl==#a_flags) or (not #b==#b_tbl==#b_flags) then
-                    log(                        "issue with length of string/tbl/flags: "..#a.."/"..#a_tbl.."/"..#a_flags)
-                end
-
-                -- looking only within the match distance, count & flag matched pairs
-                local low,hi,common         =   0,0,0
-                local i
-                for _i,v in ipairs(a_tbl) do
-                    i = _i-1
-
-                    local cursor            =   v
-                    to_log(                     "cursor_1="..cursor, verbose)
-
-                    if i>match_dist then
-                        low                 =   i-match_dist
-                    else
-                        low                 =   0
-                    end
-                    if i+match_dist<=#b then
-                        hi                  =   i+match_dist
-                    else
-                        hi                  =   #b
-                    end
-
-                    to_log(                     "low_hi "..low.." "..hi, verbose)
-
-                    for _j=low+1, hi+1 do
-                        j                   =   _j-1
-
-                        to_log(                 "ij "..i.." "..j, verbose)
-                        to_log(                 "cursor "..cursor, verbose)
-                        to_log(                 "b_tbl[j+1] "..b_tbl[j+1], verbose)
-
-                        if not b_flags[j+1] and b_tbl[j+1]==cursor then
-                            to_log(             "BREAK_HERE", verbose)
-                            a_flags[i+1]    =   true
-                            b_flags[j+1]    =   true
-                            common          =   common+1
-                            break
-                        end
-                    end
-                end
-                to_log(                         "a_flags="..cjson_encode(a_flags, verbose) , verbose)
-                to_log(                         "b_flags="..cjson_encode(b_flags, verbose) , verbose)
-
-                -- return nil if no exact or transpositional matches
-                if common==0 then               return nil end
-                to_log(                         "common = "..common, verbose)
-
-                -- count transpositions
-                local first,k,trans_count   =   true,1,0
-                local _j
-                for _i,v in ipairs(a_tbl) do
-                    i                       =   _i - 1
-
-                    if a_flags[i+1] then
-
-                        for j=k, #b do
-                            _j              =   j - 1
-
-                            to_log(            "i,j,_j= "..i..","..j..",".._j, verbose)
-                            to_log(            "b_flags[j]= "..cjson_encode({b_flags[j]}, verbose) , verbose)
-
-                            if b_flags[j] then
-                                k           =   j+1
-                                break
-                            end
-                        end
-
-                        to_log(                 "k= "..k, verbose)
-                        to_log(                 "a_tbl[i+1]= "..a_tbl[i+1], verbose)
-
-                        if not j and first then
-                            _j,first        =   1,false
-                        else
-                            _j              =   _j + 1
-                        end
-
-                        to_log(                 "b_tbl[_j]= "..b_tbl[_j], verbose)
-                        if a_tbl[i+1]~=b_tbl[_j] then
-                            if (not trans_count or trans_count==0) then
-                                trans_count =   1
-                            else
-                                trans_count =   trans_count+1
-                            end
-                        end
-
-                    end
-                end
-                trans_count                 =   trans_count/2
-                to_log(                         "trans_count = "..trans_count, verbose)
-
-                -- adjust for similarities in nonmatched characters
-                local weight                =   0
-                weight                      =   ( ( common/#a + common/#b +
-                                                    (common-trans_count)/common ) )/3
-                to_log(                         "weight = "..weight, verbose)
-
-                -- winkler modification: continue to boost if strings are similar
-                local i,_i,j                =   0,0,0
-                if winklerize and weight>0.7 and #a>3 and #b>3 then
-
-                    -- adjust for up to first 4 chars in common
-
-                    if #a<4 then                j = #a
-                    else                        j = 4 end
-                    to_log(                     "i,j_1= "..i..","..j, verbose)
-
-                    for _i=1, j-1 do
-                        if _i==1 then           i = _i-1 end
-                        if a_tbl[_i]==b_tbl[_i] and #b>=_i then
-                            if not i then       i = 1
-                            else                i = i+1 end
-                            to_log(             "i,_i,j_2= "..i..",".._i..","..j, verbose)
-                        end
-                        if i>j then             break end
-                    end
-                    to_log(                     "i,_i,j_3= "..i..",".._i..","..j, verbose)
-
-                    if i-1>0 then
-                        i = i-1
-                        weight              =   weight + ( i * 0.1 * (1.0 - weight) )
-                    end
-                    to_log(                     "new weight_1 = "..weight, verbose)
-
-                    -- optionally adjust for long strings
-                    -- after agreeing beginning chars, at least two or more must agree and
-                    -- agreed characters must be > half of remaining characters
-                    if ( long_tolerance and
-                         #a>4 and
-                         common>i+1 and
-                         2*common>=#a+i ) then
-                        weight              =   weight + ((1.0 - weight) * ( (common-i-1) / (#a+#b-i*2+2)))
-                    end
-
-                    to_log(                     "new weight_2 = "..weight, verbose)
-
-                end
-
-                return weight
-
-                $BODY$ LANGUAGE plluau;
+            $BODY$ LANGUAGE plluau;
             """
             self.T.to_sql(                      cmd)
+        def z_string_matching(self):
+            comment = """
 
+                The input querys A and B must provide the aliases (a_str, a_idx),(b_str, b_idx), respectively.
+                For each a_str, this function finds the best matching b_str,
+                and returns (a_str, a_idx, jaro_score, b_str, b_idx, other_matching).
+                "other_matching" provides the b_idx for other b_str having the same highest score.
+                Avoid using "pllua_" as an a prefix for any alias within either qry_a or qry_b.
+
+                """.replace('\t','').strip('\n')
+            qry="""
+                DROP TYPE IF EXISTS str_match_res CASCADE;
+                CREATE TYPE str_match_res AS (
+                    a_idx TEXT,
+                    a_str TEXT,
+                    jaro_score TEXT,
+                    b_str TEXT,
+                    b_idx TEXT,
+                    other_matches TEXT
+                );
+
+                DROP FUNCTION IF EXISTS         z_string_matching(  text,text  );
+                CREATE OR REPLACE FUNCTION      z_string_matching(  qry_a text, qry_b text  )
+
+                RETURNS SETOF str_match_res AS $BODY$
+
+                    package.loaded.string_matching = nil
+                    str_m = require "string_matching"
+                    --str_m.jaro_score("MARTHA","MARHTA")
+                    str_m.iter_jaro(qry_a,qry_b)
+
+
+                $BODY$ LANGUAGE plluau;
+
+                COMMENT ON FUNCTION z_string_matching( text,text ) IS '%s';
+
+            """ % comment
+            self.T.to_sql(                      qry)
         def z_str_comp_lcs(self):
             cmd="""
                 DROP FUNCTION IF EXISTS         z_str_comp_lcs( text,text);
@@ -2785,138 +2688,136 @@ class pgSQL_Functions:
             self.T.conn.set_isolation_level(       0)
             self.T.cur.execute(                    cmd)
         def z_custom_addr_post_filter_with_iter(self):
-            a=0
-            # cmd="""
-            #
-            #     DROP FUNCTION IF EXISTS z_custom_addr_post_filter_with_iter(stdaddr[],text[],integer[]);
-            #     CREATE OR REPLACE FUNCTION z_custom_addr_post_filter_with_iter(   res stdaddr[],
-            #                                                             orig_addr text[],
-            #                                                             src_gid integer[])
-            #     RETURNS SETOF parsed_addr AS $$
-            #         return _U(res,orig_addr,src_gid)
-            #     end
-            #     do
-            #         _U = function(res,orig_addr,src_gid)
-            #
-            #         local some_src_cols = {"building","house_num","predir","qual","pretype","name","suftype","sufdir",
-            #                                 "city","state","postcode","box","unit",}
-            #
-            #         local some_dest_cols = {"bldg","num","predir","qual","pretype","name","suftype","sufdir",
-            #                                 "city","state","zip","box","unit"}
-            #
-            #
-            #         for i=1, #res do
-            #
-            #             local tmp = res[i]
-            #             local tmp_pt = {}
-            #             local tmp_col = ""
-            #
-            #             for k,v in pairs(some_dest_cols) do
-            #                 tmp_col = some_src_cols[k]
-            #                 tmp_pt[v]=tmp[tmp_col]
-            #             end
-            #             tmp_pt["src_gid"] = src_gid[i]
-            #             tmp_pt["orig_addr"] = orig_addr[i]
-            #             tmp_pt["zip"]=tmp.postcode
-            #
-            #             -- CLEAN UP TEMP SUBSTITUTION {Qx5 = no space, Qx4 = space} < -- OUTPUT
-            #             if tmp_pt["name"] then
-            #                 if tmp_pt["name"]:find("QQQQQ") then
-            #                     tmp_pt["name"] = tmp_pt["name"]:gsub("(QQQQQ)","")
-            #                 end
-            #                 if tmp_pt["name"]:find("QQQQ") then
-            #                     tmp_pt["name"] = tmp_pt["name"]:gsub("(QQQQ)"," ")
-            #                 end
-            #                 if tmp_pt["name"]:find("AVENUE OF THE") then
-            #                     tmp_pt["suftype"] = "AVE"
-            #                 end
-            #             end
-            #
-            #             local t = ""
-            #             local s1,e1,s2,e2 = 0,0,0,0
-            #
-            #             -- DISCARD PRETYPES, MOVE THEM BACK TO 'NAME', UPDATE SUFTYPE
-            #             if tmp_pt["pretype"] then
-            #                 --log("1702")
-            #                 if tmp_pt["num"]==0 then
-            #                     s1,e1=0,0
-            #                 else
-            #                     s1,e1 = orig_addr[i]:find(tmp_pt["num"])
-            #                 end
-            #
-            #                 if e1==nil then
-            #                     log(tmp_pt["num"])
-            #                     log(tmp_pt["name"])
-            #                     log(orig_addr[i])
-            #                     log(tmp_pt["pretype"])
-            #                     log(src_gid[i])
-            #                     if true then return end
-            #                 end
-            #
-            #                 s2,e2 = orig_addr[i]:find(tmp_pt["name"])
-            #
-            #                 if s2==nil then
-            #                     log(tmp_pt["num"])
-            #                     log(tmp_pt["name"])
-            #                     log(orig_addr[i])
-            #                     log(tmp_pt["pretype"])
-            #                     log(src_gid[i])
-            #                     if true then return end
-            #                 end
-            #
-            #                 t = orig_addr[i]:sub(e1+2,s2-2)
-            #
-            #                 -- if this string has a space, meaning at least two words, take only last word
-            #                 if t:find("[%s]")==nil then
-            #                     tmp_pt["name"] = t.." "..tmp_pt["name"]
-            #                 else
-            #                     t = t:gsub("(.*)%s([a-zA-Z0-9]+)$","%2")
-            #                     tmp_pt["name"] = t.." "..tmp_pt["name"]
-            #                 end
-            #                 tmp_pt["pretype"] = nil
-            #
-            #                 t = orig_addr[i]:sub(e2+2)
-            #
-            #                 cmd = string.format([[  select usps_abbr abbr
-            #                                         from usps where common_use ilike '%s']],t)
-            #
-            #                 for row in server.rows(cmd) do
-            #                     t = row.abbr
-            #                     break
-            #                 end
-            #
-            #                 tmp_pt["suftype"] = t:upper()
-            #
-            #             end
-            #
-            #             -- FOR ANY PREDIR NOT 'E' OR 'W', MOVE BACK TO 'NAME'
-            #             if tmp_pt["predir"] and (tmp_pt["predir"]~="E" and tmp_pt["predir"]~="W") then
-            #                 --log("1742")
-            #                 if tmp_pt["predir"]=='N' then t = "NORTH" end
-            #                 if tmp_pt["predir"]=='S' then t = "SOUTH" end
-            #
-            #                 tmp_pt["predir"] = nil
-            #                 tmp_pt["name"] = t.." "..tmp_pt["name"]
-            #             end
-            #
-            #             -- WHEN UNIT CONTAINS 'PIER', e.g., 'PIER-15 SOUTH STREET' (filtered as '0 PIER-15 SOUTH STREET')
-            #             if tmp_pt["unit"] then
-            #                 if tmp_pt["unit"]:find('# 0 PIER') and tmp_pt["bldg"]==nil then
-            #                     tmp_pt["bldg"] = "PIER "..tmp_pt["num"]
-            #                     tmp_pt["num"] = 0
-            #                     tmp_pt["unit"] = nil
-            #                 end
-            #             end
-            #
-            #             coroutine.yield(tmp_pt)
-            #         end
-            #
-            #     end
-            #
-            #     $$ LANGUAGE plluau;
-            # """
-            self.T.conn.set_isolation_level(       0)
-            self.T.cur.execute(                    cmd)
+            cmd="""
+
+                DROP FUNCTION IF EXISTS z_custom_addr_post_filter_with_iter(stdaddr[],text[],integer[]);
+                CREATE OR REPLACE FUNCTION z_custom_addr_post_filter_with_iter(   res stdaddr[],
+                                                                        orig_addr text[],
+                                                                        src_gid integer[])
+                RETURNS SETOF parsed_addr AS $$
+                    return _U(res,orig_addr,src_gid)
+                end
+                do
+                    _U = function(res,orig_addr,src_gid)
+
+                    local some_src_cols = {"building","house_num","predir","qual","pretype","name","suftype","sufdir",
+                                            "city","state","postcode","box","unit",}
+
+                    local some_dest_cols = {"bldg","num","predir","qual","pretype","name","suftype","sufdir",
+                                            "city","state","zip","box","unit"}
+
+
+                    for i=1, #res do
+
+                        local tmp = res[i]
+                        local tmp_pt = {}
+                        local tmp_col = ""
+
+                        for k,v in pairs(some_dest_cols) do
+                            tmp_col = some_src_cols[k]
+                            tmp_pt[v]=tmp[tmp_col]
+                        end
+                        tmp_pt["src_gid"] = src_gid[i]
+                        tmp_pt["orig_addr"] = orig_addr[i]
+                        tmp_pt["zip"]=tmp.postcode
+
+                        -- CLEAN UP TEMP SUBSTITUTION {Qx5 = no space, Qx4 = space} < -- OUTPUT
+                        if tmp_pt["name"] then
+                            if tmp_pt["name"]:find("QQQQQ") then
+                                tmp_pt["name"] = tmp_pt["name"]:gsub("(QQQQQ)","")
+                            end
+                            if tmp_pt["name"]:find("QQQQ") then
+                                tmp_pt["name"] = tmp_pt["name"]:gsub("(QQQQ)"," ")
+                            end
+                            if tmp_pt["name"]:find("AVENUE OF THE") then
+                                tmp_pt["suftype"] = "AVE"
+                            end
+                        end
+
+                        local t = ""
+                        local s1,e1,s2,e2 = 0,0,0,0
+
+                        -- DISCARD PRETYPES, MOVE THEM BACK TO 'NAME', UPDATE SUFTYPE
+                        if tmp_pt["pretype"] then
+                            --log("1702")
+                            if tmp_pt["num"]==0 then
+                                s1,e1=0,0
+                            else
+                                s1,e1 = orig_addr[i]:find(tmp_pt["num"])
+                            end
+
+                            if e1==nil then
+                                log(tmp_pt["num"])
+                                log(tmp_pt["name"])
+                                log(orig_addr[i])
+                                log(tmp_pt["pretype"])
+                                log(src_gid[i])
+                                if true then return end
+                            end
+
+                            s2,e2 = orig_addr[i]:find(tmp_pt["name"])
+
+                            if s2==nil then
+                                log(tmp_pt["num"])
+                                log(tmp_pt["name"])
+                                log(orig_addr[i])
+                                log(tmp_pt["pretype"])
+                                log(src_gid[i])
+                                if true then return end
+                            end
+
+                            t = orig_addr[i]:sub(e1+2,s2-2)
+
+                            -- if this string has a space, meaning at least two words, take only last word
+                            if t:find("[%s]")==nil then
+                                tmp_pt["name"] = t.." "..tmp_pt["name"]
+                            else
+                                t = t:gsub("(.*)%s([a-zA-Z0-9]+)$","%2")
+                                tmp_pt["name"] = t.." "..tmp_pt["name"]
+                            end
+                            tmp_pt["pretype"] = nil
+
+                            t = orig_addr[i]:sub(e2+2)
+
+                            cmd = string.format([[  select usps_abbr abbr
+                                                    from usps where common_use ilike '%s']],t)
+
+                            for row in server.rows(cmd) do
+                                t = row.abbr
+                                break
+                            end
+
+                            tmp_pt["suftype"] = t:upper()
+
+                        end
+
+                        -- FOR ANY PREDIR NOT 'E' OR 'W', MOVE BACK TO 'NAME'
+                        if tmp_pt["predir"] and (tmp_pt["predir"]~="E" and tmp_pt["predir"]~="W") then
+                            --log("1742")
+                            if tmp_pt["predir"]=='N' then t = "NORTH" end
+                            if tmp_pt["predir"]=='S' then t = "SOUTH" end
+
+                            tmp_pt["predir"] = nil
+                            tmp_pt["name"] = t.." "..tmp_pt["name"]
+                        end
+
+                        -- WHEN UNIT CONTAINS 'PIER', e.g., 'PIER-15 SOUTH STREET' (filtered as '0 PIER-15 SOUTH STREET')
+                        if tmp_pt["unit"] then
+                            if tmp_pt["unit"]:find('# 0 PIER') and tmp_pt["bldg"]==nil then
+                                tmp_pt["bldg"] = "PIER "..tmp_pt["num"]
+                                tmp_pt["num"] = 0
+                                tmp_pt["unit"] = nil
+                            end
+                        end
+
+                        coroutine.yield(tmp_pt)
+                    end
+
+                end
+
+                $$ LANGUAGE plluau;
+            """
+            self.T.to_sql(                  cmd)
         def z_custom_addr_pre_filter(self):
             """
 
@@ -3381,7 +3282,7 @@ class pgSQL_Triggers:
             self                            =   _parent.T.To_Sub_Classes(self,_parent)
 
         def z_auto_add_primary_key(self):
-            self.T.z_next_free()
+            self.F.functions_create_z_next_free()
             c                           =   """
                 DROP FUNCTION if exists z_auto_add_primary_key() CASCADE;
 
@@ -4060,6 +3961,36 @@ class pgSQL_Tables:
                                                     AND table_name='%s');
                                                 """ % table_name
         return                                  self.T.pd.read_sql(qry,self.T.eng).exists[0]
+
+    def get_info(self,table_name):
+        qry                                 =   """
+                                                SELECT column_name, data_type, character_maximum_length
+                                                FROM INFORMATION_SCHEMA.COLUMNS
+                                                WHERE table_name = '%s';
+                                                """ % table_name
+        return                                  self.T.pd.read_sql(qry,self.T.eng)
+
+    def has_col(self,table_name,column_name):
+        qry                                 =   """
+                                                SELECT EXISTS (
+                                                    SELECT 1
+                                                    FROM INFORMATION_SCHEMA.COLUMNS
+                                                    WHERE table_name = '%s'
+                                                    AND column_name = '%s'
+                                                    );
+                                                """ % (table_name,column_name)
+        return                                  self.T.pd.read_sql(qry,self.T.eng).exists[0]
+
+    def get_tables_and_indicies(self):
+        qry                                 =   """
+                                                SELECT pg_class.relname, pg_attribute.attname
+                                                    FROM pg_class, pg_attribute, pg_index
+                                                    WHERE pg_class.oid = pg_attribute.attrelid AND
+                                                        pg_class.oid = pg_index.indrelid AND
+                                                        pg_index.indkey[0] = pg_attribute.attnum AND
+                                                        pg_index.indisprimary = 't';
+                                                """
+        return                                  self.T.pd.read_sql(qry,self.T.eng)
 
     class Update:
         def __init__(self,_parent):
@@ -6748,7 +6679,7 @@ class pgSQL_Tables:
                 import getpass
                 sql_file                    =   save_dir + 'mn_pluto.sql'
                 log_f                       =   save_dir + 'shp_import.log'
-                pw                          =   getpass.getpass('root password?\t')
+                pw                          =   getpass.getpass('root password? (not saved or visible, needed to load shapefiles into DB)\t')
                 tbl_name                    =   self.T.PLUTO_TBL
                 print 'Using title "%s" for pluto table.' % tbl_name
 
@@ -6811,7 +6742,7 @@ class pgSQL_Tables:
                 if not self.T.check_primary_key('mnv'):
                     self.T.make_column_primary_serial_key('mnv','uid')
 
-            def turnstile_data(self):
+            def turnstile_data(self,update=False):
                 """
                 NOTE:   NYC Turn Stile data format changed starting 10/18/14.
                         This function was developed before 10/18/14 and only applies to data in the older format.
@@ -6843,23 +6774,73 @@ class pgSQL_Tables:
                     self.T.to_sql(                  'drop table if exists sub_stations')
                     s.to_sql(                       'sub_stations',self.T.eng,index=False)
 
-                    if not self.T.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                    if not self.F.triggers_enabled_event_trigger('missing_primary_key_trigger'):
                         self.T.to_sql(              """
                                                     alter table sub_stations add column uid serial primary key;
                                                     update sub_stations set uid = nextval(pg_get_serial_sequence('sub_stations','uid'));
                                                     """)
 
-                    self.T.to_sql(                  'alter table sub_stations add column geom geometry(Point,4326)')
-                    self.T.to_sql(                  "UPDATE sub_stations set geom = ST_SetSRID(ST_MakePoint(station_longitude,station_latitude),4326)")
+                    qry = """
 
-                    if not self.T.check_table_exists(self.T.PLUTO_TBL):
-                        print 'This function depends on NYC tax lot geometries (MapPLUTO) being available in pgSQL.'
-                        print 'Currently this is looking for table "%s"' % self.T.PLUTO_TBL
-                        print 'If no pluto table exists, run "import f_postgres as PG; pg=PG.pgSQL(); pg.Create.NYC.pluto();"'
-                        print 'Else, consider changing the target table variable at the top of this function'
-                        make_pluto = raw_input('\nRun the script to make pluto using table name: "%s" ? (y/n)\t' % self.T.PLUTO_TBL)
+                        ALTER TABLE sub_stations ADD COLUMN geom GEOMETRY(Point,4326);
+                        UPDATE sub_stations SET geom = ST_SetSRID(ST_MakePoint(station_longitude,station_latitude),4326);
+
+                        -------------------------------------
+                        ------------------------------------- <<<
+                        -- ADDING div_line TO STATIONS
+
+                        ALTER TABLE sub_stations ADD COLUMN div_line TEXT;
+                        UPDATE sub_stations _stations
+                        SET div_line = concat_ws('_',div,trim(both ' ' from f.concat))
+                        FROM (
+                                SELECT
+                                    division div,
+                                    concat(route_1::text,route_2::text,route_3::text,
+                                    route_4::text,route_5::text,route_6::text,
+                                    route_7::text,route_8::text,route_9::text,
+                                    route_10::text,route_11::text)::text,
+                                    uid
+                                FROM sub_stations
+                        ) f
+                        WHERE f.uid=_stations.uid;
+
+                        -- SORTING div_line to ensure consistency
+                        -- don't know how to do the below in pgSQL, and not worth figuring out for such a small use
+
+                        DO LANGUAGE plpythonu
+                        $BODY$
+
+                            qry = 'SELECT uid,div_line FROM sub_stations'
+                            res = plpy.execute(qry)
+                            assert len(res)>0
+                            patch = ''
+                            for it in res:
+                                _div,_line = it['div_line'].split('_')
+                                _sorted_div_line = '_'.join([ _div, ''.join(sorted(_line)) ])
+                                if not it['div_line'] == _sorted_div_line:
+                                    patch+="UPDATE sub_stations SET div_line='%s' WHERE uid=%s;" % (_sorted_div_line,it['uid'])
+                                    # plpy.log(patch)
+
+                            if patch:
+                                plpy.execute(patch)
+
+                        $BODY$;
+
+                        ------------------------------------- >>>
+                        -------------------------------------
+
+                        """
+                    self.T.to_sql(              qry)
+
+                    if not self.F.tables_exists(self.T.PLUTO_TBL):
+                        print '\nSome functions may depend on NYC tax lot geometries (MapPLUTO) being available in pgSQL.'
+                        print 'This function is currently looking for table "%s"' % self.T.PLUTO_TBL
+                        print 'Options:'
+                        print '1. Update "PLUTO_TBL" in db_settings.py to existing or preferred table name;'
+                        print '2. Create pluto table separately, such as via "import f_postgres as PG; pg=PG.pgSQL(); pg.Create.NYC.pluto();"; and/or'
+                        make_pluto = raw_input('\n3. Input "y" to continue and make pluto table with name: "%s" ? (y/n)\t' % self.T.PLUTO_TBL)
                         if make_pluto=='y':
-                            self.T.pluto()
+                            self.F.tables_create_nyc_pluto()
                         else:
                             raise SystemExit
 
@@ -6868,14 +6849,15 @@ class pgSQL_Tables:
                         #   (where Manhattan, here, is all convex hull of all geometries in %(PLUTO_TBL)s)
                         self.T.to_sql(      """ DELETE FROM sub_stations
                                                 WHERE NOT st_within(geom, (
-                                                    SELECT ST_ConcaveHull(ST_Collect(f.the_geom),100,true) as geom
+                                                    SELECT ST_ConcaveHull(ST_Collect(f.the_geom),100,true) AS geom
                                                     FROM (
-                                                        SELECT *, (ST_Dump(geom)).geom as the_geom
+                                                        SELECT *, (ST_Dump(geom)).geom AS the_geom
                                                         FROM %s
                                                     ) As f
                                                 ))
                                             """ % self.T.PLUTO_TBL)
                         print 'removed non-Manhattan subway stations'
+                    self.F.functions_run_reset_index('sub_stations','uid','div_line desc,station_name asc')
                     return
                 def add_subway_stops(remove_non_mn=False):
                     import zipfile, StringIO
@@ -6885,7 +6867,7 @@ class pgSQL_Tables:
                     self.T.to_sql(                  'drop table if exists sub_stops;')
                     sub_stops.to_sql(               'sub_stops',self.T.eng,index=False)
 
-                    if not self.T.check_evt_trigger_enabled('missing_primary_key_trigger'):
+                    if not self.F.triggers_enabled_event_trigger('missing_primary_key_trigger'):
                         self.T.to_sql(              """
                                                     alter table sub_stops add column uid serial primary key;
                                                     update sub_stops set uid = nextval(pg_get_serial_sequence('sub_stops','uid'));
@@ -6907,6 +6889,7 @@ class pgSQL_Tables:
                                             ));
                                             """ % self.T.PLUTO_TBL)
                         print 'removed non-Manhattan subway stops'
+                    self.F.functions_run_reset_index('sub_stops','uid','stop_id asc')
                     return
                 def add_turnstile_key_info():
                     ts_key                      =   self.T.pd.read_excel('http://web.mta.info/developers/resources/nyct/turnstile/Remote-Booth-Station.xls')
@@ -6980,15 +6963,36 @@ class pgSQL_Tables:
                         ALTER TABLE ts_key_min
                             DROP COLUMN rk;
 
-                        -- redo uids (and reduce possible confusion)
-                        WITH upd as (
-                            SELECT uid,row_number() over() new_uid
-                            FROM ts_key_min
-                            )
+                        -------------------------------------ts.line_name,ts.division
+                        ------------------------------------- <<<
+                        -- ADDING div_line TO STATIONS
+
+                        ALTER TABLE ts_key_min ADD COLUMN div_line TEXT;
                         UPDATE ts_key_min ts
-                        SET uid = upd.new_uid
-                        FROM upd
-                        WHERE upd.uid = ts.uid;
+                        SET div_line = regexp_replace(concat_ws('_',division,line_name)
+                                            ,E'\\s','','g');
+
+                        -- SORTING div_line to ensure consistency
+                        -- don't know how to do the below in pgSQL, and not worth figuring out for such a small use
+
+                        DO LANGUAGE plpythonu
+                        $BODY$
+
+                            qry = 'SELECT uid,div_line FROM sub_stations'
+                            res = plpy.execute(qry)
+                            assert len(res)>0
+                            patch = ''
+                            for it in res:
+                                _div,_line = it['div_line'].split('_')
+                                _sorted_div_line = '_'.join([ _div, ''.join(sorted(_line)) ])
+                                if not it['div_line'] == _sorted_div_line:
+                                    patch+="UPDATE sub_stations SET div_line='%s' WHERE uid=%s;" % (_sorted_div_line,it['uid'])
+                                    # plpy.log(patch)
+
+                            if patch:
+                                plpy.execute(patch)
+
+                        $BODY$;
 
                         -- update ts_key
                         ALTER TABLE ts_key ADD COLUMN ts_key_min_idx integer;
@@ -6999,6 +7003,7 @@ class pgSQL_Tables:
                     """
 
                     self.T.to_sql(              q)
+                    self.F.functions_run_reset_index('ts_key_min','uid','remote asc,booth asc')
                     q="""
                         select a=b as _check
                         from
@@ -7077,44 +7082,6 @@ class pgSQL_Tables:
                     """
                     self.T.to_sql(q)
 
-                def add_route_n_to_stations():
-                    q = """
-                        ALTER TABLE sub_stations ADD COLUMN route_n TEXT;
-                        UPDATE sub_stations _stations SET route_n = f.concat
-                        FROM (
-                                SELECT
-                                    concat(route_1::text,route_2::text,route_3::text,
-                                    route_4::text,route_5::text,route_6::text,
-                                    route_7::text,route_8::text,route_9::text,
-                                    route_10::text,route_11::text)::text,
-                                    uid
-                                FROM sub_stations
-                        ) f
-                        where f.uid=_stations.uid;
-
-
-                        --don't know how to do the below in pgSQL, and not worth figuring out for such a small use
-
-                        DO LANGUAGE plpythonu
-                        $BODY$
-
-                            qry = 'select uid,route_n from sub_stations'
-                            res = plpy.execute(qry)
-                            assert len(res)>0
-                            patch = ''
-                            for it in res:
-                                _sorted_rt = ''.join(sorted(it['route_n']))
-                                if not it['route_n'] == _sorted_rt:
-                                    patch+="UPDATE sub_stations SET route_n='%s' WHERE uid=%s;" % (_sorted_rt,it['uid'])
-                                    print patch
-                                    plpy.log(patch)
-
-                            if patch:
-                                plpy.execute(patch)
-
-                        $BODY$;
-                        """
-                    self.T.to_sql(q)
                 def update_tkm_with_stops_via_stations(add_col=False,with_regexp_matching=True):
                     t='' if not add_col else 'ALTER TABLE ts_key_min ADD COLUMN sub_stop_idx integer;'
                     q="""
@@ -7122,8 +7089,8 @@ class pgSQL_Tables:
                         UPDATE ts_key_min tsm SET sub_stop_idx = _st.sub_stop_idx
                         FROM
                             sub_stations _st
-                        WHERE concat(_st.division,upper(_st.station_name),_st.route_n) =
-                        concat(tsm.division,tsm.station,tsm.line_name)
+                        WHERE concat_ws('_',_st.div_line,upper(_st.station_name)) =
+                        concat_ws('_',tsm.div_line,tsm.station)
                         and _st.sub_stop_idx is not null;
                     """ % t
                     if with_regexp_matching:
@@ -7132,16 +7099,16 @@ class pgSQL_Tables:
                             UPDATE ts_key_min tsm
                             SET sub_stop_idx = _st.sub_stop_idx
                             FROM sub_stations _st
-                            WHERE concat(_st.division,_st.route_n,upper(_st.station_name)) =
-                            concat(tsm.division,tsm.line_name,regexp_replace(tsm.station,'^([^-]*)-(.*)$','\\1','g'))
+                            WHERE concat_ws('_',_st.div_line,upper(_st.station_name)) =
+                            concat_ws('_',tsm.div_line,regexp_replace(tsm.station,'^([^-]*)-(.*)$','\\1','g'))
                             AND tsm.sub_stop_idx IS NULL;
 
                             -- regex for both ts_key_min.station and sub_stations.station_name only
                             UPDATE ts_key_min tsm
                             SET sub_stop_idx = _st.sub_stop_idx
                             FROM sub_stations _st
-                            WHERE concat(_st.division,_st.route_n,upper(regexp_replace(_st.station_name,'^([^-]*)-(.*)$','\\1','g'))) =
-                            concat(tsm.division,tsm.line_name,regexp_replace(tsm.station,'^([^-]*)-(.*)$','\\1','g'))
+                            WHERE concat_ws('_',_st.div_line,upper(regexp_replace(_st.station_name,'^([^-]*)-(.*)$','\\1','g'))) =
+                            concat_ws('_',tsm.div_line,regexp_replace(tsm.station,'^([^-]*)-(.*)$','\\1','g'))
                             AND tsm.sub_stop_idx IS NULL;
                             """
                     self.T.to_sql(q)
@@ -7151,8 +7118,8 @@ class pgSQL_Tables:
                         %s
                         UPDATE sub_stations _st SET ts_key_min_idx = tsm.uid
                         FROM ts_key_min tsm
-                        WHERE concat(_st.division,upper(_st.station_name),_st.route_n) =
-                        concat(tsm.division,tsm.station,tsm.line_name);
+                        WHERE concat_ws('_',_st.div_line,upper(_st.station_name)) =
+                        concat_ws('_',tsm.div_line,tsm.station);
 
                         """ % t
                     self.T.to_sql(q)
@@ -7160,58 +7127,48 @@ class pgSQL_Tables:
                 def do_string_replacements(tbl,col):
                     t = {'tbl':tbl,'col':col}
                     patch = ''
-                    repl_dict                   =   {   r'(1st|first)'                          :   r'1',
-                                                        r'(2nd|second)'                         :   r'2',
-                                                        r'(3rd|third)'                          :   r'3',
-                                                        r'(4th|fourth)'                         :   r'4',
-                                                        r'(5th|fifth)'                          :   r'5',
-                                                        r'(6th|sixth)'                          :   r'6',
-                                                        r'(7th|seventh)'                        :   r'7',
-                                                        r'(8th|eigth)'                          :   r'8',
-                                                        r'(9th|nineth|ninth)'                   :   r'9',
+                    repl_dict                   =   {   r'(/|&)'                                :   r'-',
+                                                        r'(/|&)'                                :   r'-',
+                                                        r' - '                                  :   r'-',
+                                                        r'(^|-)N '                              :   r'\\1NORTH ',
+                                                        r'(^|-)E '                              :   r'\\1EAST ',
+                                                        r'(^|-)W '                              :   r'\\1WEST ',
+                                                        r'(^|-)S '                              :   r'\\1SOUTH ',
+                                                        r'(1st|FIRST)'                          :   r'1',
+                                                        r'(2nd|SECOND)'                         :   r'2',
+                                                        r'(3rd|THIRD)'                          :   r'3',
+                                                        r'(4th|FOURTH)'                         :   r'4',
+                                                        r'(5th|FIFTH)'                          :   r'5',
+                                                        r'(6th|SIXTH)'                          :   r'6',
+                                                        r'(7th|SEVENTH)'                        :   r'7',
+                                                        r'(8th|EIGTH)'                          :   r'8',
+                                                        r'(9th|NINETH|NINTH)'                   :   r'9',
                                                         r'(0th)'                                :   r'0',
                                                         r'(1th)'                                :   r'1',
                                                         r'(2th)'                                :   r'2',
                                                         r'(3th)'                                :   r'3',
-                                                        r'\s(street)'                           :   r' st',
-                                                        r'\s(square)'                           :   r' sq',
-                                                        r'\s(center)'                           :   r' ctr',
-                                                        r'\s(av)'                               :   r' ave',
-                                                        r'\Aunion sq'                           :   r'14 st-union sq',
-                                                        r'cathedral parkway-110 st'             :   r'110 st-cathedrl',
-                                                        r'163 st - amsterdam ave'               :   r'163 st-amsterdm',
-                                                        r'81 st - museum of natural history'    :   r'81 st-museum',
-                                                        r'47-50 sts rockefeller ctr'            :   r'47-50 st-rock',
-                                                        r'137 st-city college'                  :   r'137 st-city col',
-                                                        r'broadway-lafayette st'                :   r'broadway/lafay',
-                                                        r'west 4 st'                            :   r'w 4 st-wash sq' ,
-                                                        r'110 st-central park north'            :   r'110 st-cpn',
-                                                        r'116 st-columbia university'           :   r'116 st-columbia',
-                                                        r'168 st - washington heights'          :   r'168 st-broadway',
-                                                        r'49 st'                                :   r'49 st-7 ave',
-                                                        r'168 st\Z'                             :   r'168 st-broadway',
-                                                        r'59 st-columbus circle'                :   r'59 st-columbus',
-                                                        r'66 st-lincoln ctr'                    :   r'66 st-lincoln',
-                                                        r'68 st-hunter college'                 :   r'68st-hunter col',
-                                                        # r'astor pl'                             :   'astor place',
-                                                        r'brooklyn bridge-city hall'            :   r'brooklyn bridge',
-                                                        r'dyckman st-200 st'                    :   r'dyckman-200 st',
-                                                        r'grand central-42 st'                  :   r'42 st-grd cntrl',
-                                                        r'inwood - 207 st'                      :   r'inwood-207 st',
-                                                        r'lexington av-53 st'                   :   r'lexington-53 st',
-                                                        r'prince st'                            :   r"prince st-b''way",
-                                                        r'\Atimes sq\Z'                         :   r'42 st-times sq',
-                                                        r'times sq-42 st'                       :   r'42 st-times sq',
-                                                        r'van cortlandt park-242 st'            :   r'242 st',
-                                                        r'marble hill-225 st'                   :   r'225 st',
-                                                        r'lexington ave-53 st'                  :   r'lexington-53 st',
-                                                        r'harlem-148 st'                        :   r'148 st-lenox',
-                                                        r'\Agrand central\Z'                    :   r'42 st-grd cntrl',
-                                                        r'\Acanal st (ul)\Z'                    :   r'canal st',}
+                                                        r' STREET($|-)'                         :   r' ST\\1',
+                                                        r' ROAD($|-)'                           :   r' RD\\1',
+                                                        r' SQUARE($|-)'                         :   r' SQ\\1',
+                                                        r' CENTER($|-)'                         :   r' CTR\\1',
+                                                        r' PKY($|-)'                            :   r' PKWY\\1',
+                                                        r' PARKWAY($|-)'                        :   r' PKWY\\1',
+                                                        r' ISLAND($|-)'                         :   r' IS\\1',
+                                                        r' POINT($|-)'                          :   r' PT\\1',
+                                                        r' AV($|-)'                             :   r' AVE\\1',
+                                                        r'^AV '                                 :   r'AVE ',
+                                                        r'^FT '                                 :   r'FORT ',
+
+                                                        }
+
                     for k,v in repl_dict.iteritems():
                         t.update({'k':k,'v':v})
-                        patch+="UPDATE %(tbl)s SET %(col)s = regexp_replace(%(col)s,E'%(k)s',E'%(v)s','g'); " % t
+                        patch+="UPDATE %(tbl)s SET %(col)s = UPPER(REGEXP_REPLACE(%(col)s,E'%(k)s',E'%(v)s',E'i')); " % t
                     self.T.to_sql(patch)
+                    _base = "UPDATE %(tbl)s SET %(col)s = UPPER(REGEXP_REPLACE(%(col)s" % t
+                    self.T.to_sql(_base + ",E'"+"''"+"',E'"+"''''"+"')); ")
+                    self.T.to_sql(_base + ",E'"+"''''''"+"',E'"+"''''"+"')); ")
+
                 def do_string_matching(idx_to_string,list_of_strings,tbl,list_of_cols):
                     """
                         select z_get_string_dist(
@@ -7248,6 +7205,111 @@ class pgSQL_Tables:
 
                     return self.T.pd.read_sql(q,self.T.eng) #['matched_stations']
 
+                def recursive_str_matching(make_table=True,run_iter=False):
+                    if not self.F.functions_exists('z_string_matching'):
+                        self.F.functions_create_z_string_matching()
+                    make_table="""
+                        DROP TABLE IF EXISTS str_matching;
+                        CREATE TABLE str_matching as (
+                            SELECT
+                                uid ts_uid,
+                                div_line ts_div_line,
+                                station ts_station,
+                                ''::text ts_str,
+                                0.0::double precision jaro_score,
+                                ''::text match_str,
+                                ''::text sub_station,
+                                ''::text sub_div_line,
+                                0::integer sub_idx
+                            FROM ts_key_min
+                            WHERE sub_stop_idx IS NULL
+                            ORDER BY uid
+                        );
+
+                        """
+                    if make_table:
+                        self.T.to_sql(make_table)
+                    lua_jaro_and_update="""
+
+                        DO LANGUAGE PLPYTHONU
+                        $BODY$
+
+                            import sys
+                            sys.path.append('/home/ub2/BD_Scripts/NYC_GIS/')
+                            import tmp
+                            reload(tmp)
+                            tmp.do_this(plpy,iter_round='first')
+                            # tmp.do_this(plpy,iter_round='second')
+
+                            # from os import environ as os_environ
+                            # from sys import path as py_path
+                            # py_path.append('/home/ub2/.scripts')
+                            # import embed_ipython as I; I.embed()
+
+                            # plpy.log(py_path)
+
+                        $BODY$;
+
+                        """
+                    if run_iter:
+                        self.T.to_sql(lua_jaro_and_update)
+                    py_jaro = """
+
+                        WITH _res as (
+
+                            SELECT s1,s2,
+                                        CASE    WHEN j1=greatest(j1,j2,j3) THEN j1
+                                                WHEN j2=greatest(j1,j2,j3) THEN j2
+                                                WHEN j3=greatest(j1,j2,j3) THEN j3
+                                        END jaro
+                            FROM (
+                                SELECT
+                                    f.s1 s1,
+                                    f.s2 s2,
+                                    z_str_comp_jaro(f.s1,f.s2,false,false,false) j1,
+                                    z_str_comp_jaro(f.s1,f.s2,true,false,false) j2,
+                                    z_str_comp_jaro(f.s1,f.s2,true,true,false) j3
+                                FROM (
+                                    SELECT
+                                        unnest(array['MARTHA','DWAYNE','DIXON']) s1,
+                                        unnest(array['MARHTA','DUANE','DICKSONX']) s2
+                                    WHERE m_tbl.ts_div_line = _sub.div_line
+                                ) f
+                            ) f2
+                        )
+                        UPDATE str_matching m_tbl
+                        SET
+                            ts_str = _res.ts_str,
+                            jaro_score = _res.jaro_score,
+                            match_str = _res.match_str,
+                            sub_station = _res.sub_station,
+                            sub_div_line = _res.sub_div_line,
+                            sub_idx = _res.sub_idx
+                        FROM _res
+                        WHERE _res.ts_uid = m_tbl.ts_uid
+                        AND _res.jaro_score > m_tbl.jaro_score;
+                    """
+
+                    b="""
+                        UPDATE str_matching sm
+                        SET stat1 = concat(division,route_n,station_name)
+                        FROM sub_stations _st
+                        WHERE sm.ts_uid = tkm.uid;
+
+
+                                        # - (select uid ts_uid from ts_key_min where sub_stop_idx is null)
+                                        # 0 (select concat(division,line_name,station) from ts_key_min,(select ts_uid from str_matching)
+
+                                        # 1 (select concat(division,route_n,station_name) from sub_stations)
+                                        # 2 (select concat(division,route_n,line,station_name) from sub_stations)
+                                        # 3 (select concat(division,route_n,station_name,line) from sub_stations)
+                                        # 4 (select concat(division,route_n,_stops.stop_name) from sub_stations,
+                                        #   (   select uid,_stop_name
+                                        #       from sub_stops,(select array_agg(sub_stop_idx) all_sub_stop_idxs from sub_stations)
+                                        #       where array[uid] && all_sub_stop_idxs
+
+                        """
+
 
                 # i_trace()
 
@@ -7255,12 +7317,17 @@ class pgSQL_Tables:
                 print 'adding turn stile geoms to DB'
                 # Add subway entrances/exits to map
                 add_station_geoms()
+                do_string_replacements('sub_stations','station_name')
+                do_string_replacements('sub_stations','line')
 
                 # Add subway stops to map
                 add_subway_stops()
+                do_string_replacements('sub_stops','stop_name')
 
                 # Add turn stile key/legend to DB
                 add_turnstile_key_info()
+                do_string_replacements('ts_key','station')
+
 
                 # II. ADD DATA TO DB
 
@@ -7269,14 +7336,16 @@ class pgSQL_Tables:
                 # cols                        =   get_data_fields_pre_change()
                 cols                        =   get_data_fields_post_change()
 
-                # --- Get Latest Data:
-                data_link                   =   get_data_links(link_type='latest')
-                datetime_cols               =   [ i for i in range(0,len(cols)) if cols[i].find('date')==0 or cols[i].find('time')==0 ]
-                # print 'about to start downloading and loading turn stile data.  This might take some time.'
-                # turn_stile_data             =   self.T.pd.read_csv(data_link,names=cols,skiprows=1,parse_dates=datetime_cols)
-                # print 'turn stile data downloaded.  %s rows about to be loaded into pgSQL.' % len(turn_stile_data)
-                # turn_stile_data.to_sql(         'turn_stiles',self.T.eng,index=False)
-                # print 'turn stile data loaded.  now harmonizing data inconsistencies.'
+                # if not existing or update=True
+                if update or not self.F.tables_exists(self.T.PLUTO_TBL):
+                    # --- Get Latest Data:
+                    data_link               =   get_data_links(link_type='latest')
+                    datetime_cols           =   [ i for i in range(0,len(cols)) if cols[i].find('date')==0 or cols[i].find('time')==0 ]
+                    print                       'about to start downloading and loading turn stile data.  This might take some time.'
+                    turn_stile_data         =   self.T.pd.read_csv(data_link,names=cols,skiprows=1,parse_dates=datetime_cols)
+                    print                       'turn stile data downloaded.  %s rows about to be loaded into pgSQL.' % len(turn_stile_data)
+                    turn_stile_data.to_sql(     'turn_stiles',self.T.eng,index=False)
+                    print                       'turn stile data loaded.  now harmonizing data inconsistencies.'
 
                 # REVIEW LATER
                 # Next 2 lines were used in pre_format_change analysis, not sure of the purpose
@@ -7311,10 +7380,8 @@ class pgSQL_Tables:
                 STEP THREE:     fill ts_key_min
 
                 '''
-                do_string_replacements('ts_key_min','station')
-                do_string_replacements('sub_stations','station_name')
-                do_string_replacements('sub_stations','line')
-                do_string_replacements('sub_stops','stop_name')
+
+
 
                 #
                 update_stops_via_overlapping_station_geoms(add_col=True)
@@ -7325,9 +7392,10 @@ class pgSQL_Tables:
                 update_stops_via_overlapping_station_geoms()
                 update_stations_via_stops_idx_of_stations()
                 update_stations_via_stations_with_stops_idx()
-                add_route_n_to_stations()
                 update_tkm_with_stops_via_stations(add_col=True)
                 update_stations_via_tkm_matching(add_col=True)
+
+
 
 
 
@@ -7409,14 +7477,14 @@ class pgSQL_Tables:
                         """ % {'X':station_name}
                     self.T.to_sql(q)
 
-                station_name = 'South Ferry'
+                station_name = 'SOUTH FERRY'
                 RULE_1(station_name)
 
 
-
+                recursive_str_matching(make_table=True)
+                do_string_replacements('str_matching','ts_station')
+                recursive_str_matching(run_iter=True)
                 i_trace()
-
-                do_string_replacements('sub_stations','line')
 
 
                 # create table str_matching as (
@@ -7948,17 +8016,24 @@ class pgSQL:
 
     def __initial_check__(self):
         # at minimum, confirm that geometry is enabled
-        try:
-            self.T.to_sql("""   CREATE EXTENSION IF NOT EXISTS plpythonu;
-                                CREATE EXTENSION IF NOT EXISTS pllua;
-                                --CREATE EXTENSION IF NOT EXISTS plpgsql;
-                                CREATE EXTENSION IF NOT EXISTS postgis;""")
-        except:
-            self.F.functions_run_confirm_extensions()
+        self.F.functions_run_confirm_extensions(verbose=True)
+
+        if not self.F.triggers_exists_event_trigger('missing_primary_key_trigger'):
+            idx_trig = raw_input('add trigger to automatically create column "uid" as index col if table created without index column? (y/n)\t')
+            if idx_trig=='y':
+                self.F.triggers_create_z_auto_add_primary_key()
+
+        if not self.F.triggers_exists_event_trigger('missing_last_updated_field'):
+            modified_trig = raw_input('add trigger to automatically create column "last_updated" for all new tables and update col/row when row modified? (y/n)\t')
+            if modified_trig=='y':
+                self.F.triggers_create_z_auto_add_last_updated_field()
+                #### self.F.triggers_create_z_auto_update_timestamp()
 
     def __temp_options__(self):
 
-        self.T.redirect_logs_to_file(                  '/tmp/tmplog')
+        #self.T.redirect_logs_to_file(                  '/tmp/tmplog')
+
+        pass
 
 
 
