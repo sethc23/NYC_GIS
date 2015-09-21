@@ -1,6 +1,6 @@
 
 
-def do_this(plpy,iter_round,DEBUG=False):
+def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
 
     import os,re
 
@@ -54,24 +54,42 @@ def do_this(plpy,iter_round,DEBUG=False):
             if DEBUG:
                 log_to_file('----------ts_uid: %(a_idx)s' % r)
 
-            if '%(a_idx)s' % r=='385':
-                import ipdb
-                ipdb.set_trace()
+            if EMBED:
+                if '%(a_idx)s' % r=='385':
+                    import ipdb
+                    ipdb.set_trace()
 
             for k,v in r.iteritems():
-                if str(v).count("'") and not re.sub(r"'{1}","",str(v)).count("'"):
-                    r[k] = v.replace("'","''''")
+
+                # FIRST
+                # check if even number of single-quotes
+                if str(v).count("'") % 2==0:
+                    pass
+
+                # HACK -- replace right-most single-quote with 2 single-quotes
+                else:
+                    pt = v.rfind("'")
+                    r[k] = v[:pt] + "'" + v[pt:]
+
+                # SECOND
+                # since r is passed through 2 layers of substitution:
+                #   (1) first when creating qry variable, and
+                #   (2) within function z_string_matching called by qry
+                # then:
+                #   "'" --> "''''"
+                if str(v).count("'"):
+                    r[k] = re.sub(r"'{1}","''''",v)
 
             _t = {
                 'f_qry_a':qry_a.replace("'","''")
                       % {'concat':a_concat.replace("'","''").replace('\\','\\\\'),
-                         'cond':a_str_cond.replace("'","''")
-                            % r},
+                         'cond':a_str_cond.replace("'","''") }
+                            % r,
 
                 'f_qry_b':qry_b.replace("'","''")
                       % {'concat':b_concat.replace("'","''").replace('\\','\\\\'),
-                         'cond':b_str_cond.replace("'","''")
-                            % r},
+                         'cond':b_str_cond.replace("'","''") }
+                            % r,
 
                 'res_cond':result_cond
                  }
@@ -117,11 +135,6 @@ def do_this(plpy,iter_round,DEBUG=False):
                     SELECT * FROM upd
                     """ % _t
 
-            while qry.count("'''"):
-                re.sub(r"'{3}","''",qry)
-
-
-
             # log_to_file(qry)
             q_res = plpy.execute(qry)
 
@@ -140,8 +153,9 @@ def do_this(plpy,iter_round,DEBUG=False):
 
     def mark_unmatched(r):
         plpy.execute("UPDATE str_matching SET jaro_score=-1 WHERE ts_uid=%(a_idx)s"%r)
-        log_to_file('marked')
-        log_to_file(r)
+        if DEBUG:
+            log_to_file('marked')
+            log_to_file(r)
 
     def run_iter():
 
@@ -251,8 +265,7 @@ def do_this(plpy,iter_round,DEBUG=False):
         a_str_idx_cond = ' WHERE jaro_score>=0 AND jaro_score<0.95'
         a_str_cond = ' WHERE ts_uid=%(a_idx)s AND jaro_score>=0' #    jaro_score --> -1 when no matches in round 2
 
-        #import IPython as I
-        #I.embed_kernel()
+
 
         _t =        {'name' : "station_name ~* '%(a_str)s'",
                      'div' : "split_part(div_line,'_',1)=SPLIT_PART('%(ts_div_line)s','_',1)",
@@ -270,10 +283,10 @@ def do_this(plpy,iter_round,DEBUG=False):
 
         for it in b_str_conditions:
             b_str_cond = ' WHERE ' + it
-            import IPython as I
-            I.embed_kernel()
+            if EMBED:
+                import IPython as I
+                I.embed_kernel()
             run_iter()
-            break
 
     elif iter_round=='third':
         a_prefix,a_suffix = '',',ts_div_line'
