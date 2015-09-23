@@ -1,6 +1,22 @@
 
 
-def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
+def do_this(plpy,**kwargs):
+    global DEBUG,EMBED
+
+    _defaults = {'iter_round':'first','DEBUG':False,'EMBED':False}
+    _defaults.update(kwargs)
+    for k,v in _defaults.iteritems():
+        if type(v)==str:
+            exec('%s = """%s"""' % (k,v),globals())
+        else:
+            exec('%s = %s' % (k,v),globals())
+
+    if DEBUG and type(DEBUG)==bool:
+        DEBUG = 1
+    elif DEBUG and type(DEBUG)==int:
+        DEBUG = 3 if DEBUG>=3 else DEBUG
+    else:
+        print 'unknown DEBUG parameter input'
 
     import os,re
 
@@ -15,17 +31,19 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
     # import ipdb
     # ipdb.set_trace()
 
-    if DEBUG:
-        os.system("echo '\\n\\n'`date --utc`")
+
+
+    if DEBUG>=1:
+        os.system("echo '\\n\\n'`date --utc` >> /tmp/tmpfile")
+
 
     def log_to_file(msg):
-        # for m in msg.split('\n'):
         # plpy.log(msg)
-        os.system("echo '%s' >> /tmp/tmpfile" % msg)
+        _file = '/tmp/tmpfile'
+        with open(_file,'a') as f:
+            f.write(str(msg) + '\n')
 
     def run_query(**kwargs):
-
-        locals().update(kwargs)
 
         qry_a = """ SELECT
                         UPPER(CONCAT_WS('_',
@@ -50,16 +68,23 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
         _updated = False
         ra = plpy.execute( qry_a % {'concat':a_concat,'cond':a_str_idx_cond} )
         if not ra:
+            if DEBUG>=1:
+                log_to_file('--- ending run_iter early ---')
             return _updated,0
         # else...
         for r in ra:
 
-            if a_updates.count(r["a_idx"]):
+            # TODO: when string comparisons begin to use only parts of strings, other data should be added
+            # TODO: add conditional for iterating parts of a_str
+
+
+            if a_updates.count(r["a_idx"]) \
+                and exclude_new_matches_from_subsequent_searches:
                 pass
 
             else:
 
-                if DEBUG:
+                if DEBUG>=1:
                     log_to_file('----------ts_uid: %(a_idx)s' % r)
 
                 for k,v in r.iteritems():
@@ -95,14 +120,17 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
                                 % r,
 
                     'res_cond':result_cond
+                    'params_as_json' : params_as_json
                      }
 
                 qry =   """
                         WITH qry AS (
                             SELECT (z).*
                             FROM z_string_matching(
-                                e'%(f_qry_a)s'::text,
-                                e'%(f_qry_b)s'::text) z
+                                E'%(f_qry_a)s'::text,
+                                E'%(f_qry_b)s'::text,
+                                E'%(params_as_json)s'
+                                ) z
                         )
                         ,str_matching_form as (
                             select
@@ -138,21 +166,26 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
                         SELECT * FROM str_matching_form
                         """ % _t
 
+
                 q_res = plpy.execute(qry)
 
                 if q_res:
-                    if DEBUG:
+                    if DEBUG>=1:
                         log_to_file("found")
-                        log_to_file(q_res)
 
                     _updated = True
 
-                if DEBUG:
-                    # log_to_file(qry)
+                if DEBUG>=1:
                     log_to_file(q_res)
-                    pass
+                if DEBUG>=3:
+                    log_to_file(qry)
 
-                break
+                # TODO: remove
+                if EMBED:
+                    import ipdb
+                    ipdb.set_trace()
+
+                # break
 
         return _updated,r
 
@@ -168,14 +201,9 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
                             FROM upd u
                             WHERE s.uid=u.uid;
               """ % r
-        if DEBUG:
+        if DEBUG>=2:
             log_to_file('marking')
             log_to_file(r)
-
-        # TODO: remove
-        # if EMBED and r['a_idx']==373:
-        #     import ipdb
-        #     ipdb.set_trace()
 
         plpy.execute(qry)
 
@@ -188,60 +216,60 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
         #      first half of station name split by "-",
         #      second half of station name split by "-",
 
-        a_str_concat=['%s ts_station %s' % (a_prefix,a_suffix),
+        # TODO: fix below
+
+        a_str_concat=['%s ts_station %s' % (a_prefix,a_suffix)]
+        a_str_concat_partial=[
                       "%s REGEXP_REPLACE(ts_station,E'^([^-/]*)(-|/)(.*)$',E'\\1',E'g') %s" % (a_prefix,a_suffix),
                       "%s REGEXP_REPLACE(ts_station,E'^([^-/]*)(-|/)(.*)$',E'\\3',E'g') %s" % (a_prefix,a_suffix),
                       ]
-        b_str_concat=['%s station_name %s' % (b_prefix,b_suffix),
+        if iter_a_str_parts:
+            a_str_concat.extend(a_str_concat_partial)
+
+        b_str_concat=['%s station_name %s' % (b_prefix,b_suffix)]
+        b_str_concat_partial=[
                       "%s REGEXP_REPLACE(station_name,E'^([^-/]*)(-|/)(.*)$',E'\\1',E'g') %s" % (b_prefix,b_suffix),
                       "%s REGEXP_REPLACE(station_name,E'^([^-/]*)(-|/)(.*)$',E'\\3',E'g') %s" % (b_prefix,b_suffix),
                       ]
+        if iter_b_str_parts:
+            b_str_concat.extend(b_str_concat_partial)
 
         # Note re: "\"
         #   each substitution interprets "\\" as "\"
         #   final log print of query before execution needs "\\\\" to read "\\"
 
         global a_concat,b_concat,a_updates
-        a_updates = []
-        end = False
-        while True:
+        a_updates,updated,end = [],False,False
+        for i in range(len(a_str_concat)):
+            a_concat = a_str_concat[i].replace('\\','\\\\')
 
-            updated = False
-            for i in range(len(a_str_concat)):
-                a_concat = a_str_concat[i].replace('\\','\\\\')
+            for j in range(len(b_str_concat)):
+                b_concat = b_str_concat[j].replace('\\','\\\\')
 
-                for j in range(len(b_str_concat)):
-                    b_concat = b_str_concat[j].replace('\\','\\\\')
+                if DEBUG>=2:
+                    log_to_file('Iterating str_concat (i,j) = (%s,%s)'%(i,j))
 
-                    _t = {'a_concat' : a_concat,
-                          'b_concat' : b_concat,}
+                res,r = run_query(a_concat=a_concat,b_concat=b_concat)
+                if res:
+                    updated = True
+                    a_updates.append(r['a_idx'])
+                elif not r:
+                    end = True
+                    break
 
-                    res,r = run_query(**_t)
-                    if res:
-                        updated = True
+                elif (not updated
+                    and i==len(a_str_concat)-1
+                    and j==len(b_str_concat)-1):
                         a_updates.append(r['a_idx'])
-                    elif not r:
-                        end = True
-                        break
-                    # cut loop when everything already updated
-                    elif not res and a_updates.count(r['a_idx']):
-                        end = True
-                        break
-
-                    if end:
-                        break
-                    elif (not updated
-                        and i==len(a_str_concat)-1
-                        and j==len(b_str_concat)-1):
-                            a_updates.append(r['a_idx'])
-                            if DEBUG:
-                                log_to_file('MARKING UNMATCHED')
-                            mark_unmatched(r)
+                        if DEBUG>=2:
+                            log_to_file('MARKING UNMATCHED')
+                        mark_unmatched(r)
 
                 if end:
                     break
             if end:
                 break
+
 
     a=0
 
@@ -265,15 +293,28 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
         #   (4) all results with higher scores replace in str_matching (default: 0.0)
 
     # TODO: Z.JARO_SCORE==SAME AND NEW RESULT HAS NUMBER
-
+    global params_as_json
+    global exclude_new_matches_from_subsequent_searches
+    global iter_a_str_parts,iter_b_str_parts
+    global iter_a_str_perms,iter_b_str_perms
 
     if iter_round=='first':
         a_prefix,a_suffix = '',''
         b_prefix,b_suffix = '',''
+
+        iter_a_str_parts = False
+        iter_b_str_parts = False
+
+        iter_a_str_perms = False
+        iter_b_str_perms = False
+
         a_str_idx_cond = ' WHERE jaro_score=0'            #  this relates to first_iter matching single 'a' results
         a_str_cond =' WHERE ts_uid=%(a_idx)s AND jaro_score>=0'
+        exclude_new_matches_from_subsequent_searches = True
+
         b_str_cond =" WHERE div_line='%(ts_div_line)s'"
         result_cond = 'WHERE NOT z.jaro_score::DOUBLE PRECISION < 0.95'
+
 
         run_iter()
 
@@ -281,7 +322,19 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
         res = plpy.execute("""WITH old AS (SELECT uid FROM str_matching WHERE jaro_score=-1) UPDATE str_matching s SET jaro_score=0 FROM old o WHERE o.uid = s.uid;""")
         a_prefix,a_suffix = '',''
         b_prefix,b_suffix = '',''
+
+        iter_a_str_parts = False
+        iter_b_str_parts = False
+
+        iter_a_str_perms = False
+        iter_b_str_perms = False
+
         a_str_idx_cond = ' WHERE jaro_score>=0 AND jaro_score<0.95'
+        exclude_new_matches_from_subsequent_searches = False
+
+        #TODO: remove
+        a_str_idx_cond = ' WHERE jaro_score>=0 AND jaro_score<0.95 and ts_uid=47'
+
         a_str_cond = ' WHERE ts_uid=%(a_idx)s AND jaro_score>=0' #    jaro_score --> -1 when no matches in round 2
 
 
@@ -291,9 +344,15 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
                      'line' : "SPLIT_PART(div_line,'_',2)~*SPLIT_PART('%(ts_div_line)s','_',2)",
                     }
 
-        b_str_conditions = [' AND '.join([_t['name'],_t['div'],_t['line']]),
-                            ' AND '.join([_t['name'],_t['div']]),
-                            ' AND '.join([_t['name'],_t['line']]),
+        b_str_conditions = [
+                            # ' AND '.join([_t['name'],_t['div'],_t['line']]),
+                            # ' AND '.join([_t['name'],_t['div']]),
+                            # ' AND '.join([_t['name'],_t['line']]),
+                            # order important for jaro-winkler score
+                            # ' AND '.join([_t['div'],_t['line'],_t['name']]),
+                            # ' AND '.join([_t['line'],_t['name']]),
+                            # ' AND '.join([_t['div'],_t['name']]),
+                            ''
                             # ' AND '.join([_t['div'],_t['line']]),
                             # _t['line'],
                            ]
@@ -301,13 +360,18 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
         result_cond = ' WHERE z.jaro_score::DOUBLE PRECISION >= _str.jaro_score'
 
         for it in b_str_conditions:
-            if DEBUG:
+            if DEBUG>=1:
                 log_to_file('cond #: %s' % b_str_conditions.index(it))
 
-            b_str_cond = ' WHERE ' + it
+            if it:
+                b_str_cond = ' WHERE ' + it
+            else:
+                b_str_cond = ''
+
             if EMBED:
                 import IPython as I
                 I.embed_kernel()
+
             run_iter()
 
         # result_cond = ' WHERE z.jaro_score::DOUBLE PRECISION > _str.jaro_score::DOUBLE PRECISION'
@@ -329,7 +393,7 @@ def do_this(plpy,iter_round,DEBUG=False,EMBED=False):
         result_cond = ' '
         run_iter()
 
-    if DEBUG:
+    if DEBUG>=1:
         os.system("echo `date --utc`'\\nDONE' >> /tmp/tmpfile")
 
 
