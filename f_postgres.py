@@ -1725,6 +1725,11 @@ class pgSQL_Functions:
             """ % comment
             self.T.to_sql(                      qry)
         def z_str_comp_lcs(self):
+            comment = """
+
+                Longest Common Subsequence
+
+                """.replace('\t','').strip('\n')
             cmd="""
                 DROP FUNCTION IF EXISTS         z_str_comp_lcs( text,text);
                 CREATE OR REPLACE FUNCTION      z_str_comp_lcs( s1              text,
@@ -1754,7 +1759,10 @@ class pgSQL_Functions:
                 return res
 
                 $BODY$ LANGUAGE plluau;
-            """
+
+            COMMENT ON FUNCTION z_str_comp_lcs( text,text) IS '%s';
+
+            """ % comment
             self.T.to_sql(                      cmd)
 
         def z_update_with_geom_from_coords(self):
