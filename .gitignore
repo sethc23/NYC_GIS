@@ -1,3 +1,8 @@
 *.pyc
+<<<<<<< HEAD
 db_settings.py
 py_classes_link.py
+=======
+>>>>>>> 9f6e2093ec52838fa59145ed8f40b6fc460de8a8
+ogr2osm/
+shape2osm/
