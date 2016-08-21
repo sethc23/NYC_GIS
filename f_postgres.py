@@ -1681,7 +1681,6 @@ class pgSQL_Functions:
 
                 The input querys A and B must provide the aliases (a_str, a_idx),(b_str, b_idx), respectively.
                 For each a_str, this function finds the best matching b_str,
-<<<<<<< HEAD
                     and returns (a_str, a_idx, jaro_score, b_str, b_idx, other_matching).
                 "other_matching" provides the b_idx for other b_str having the same highest score.
                 Avoid using "pllua_" as an a prefix for any alias within either qry_a or qry_b.
@@ -1695,12 +1694,6 @@ class pgSQL_Functions:
                     For a single emi-colon, ";;" must be at the end if at all.
                     Default value for "with_permutations" is " ;-;_;/;\\;|;&;;"
 
-=======
-                and returns (a_str, a_idx, jaro_score, b_str, b_idx, other_matching).
-                "other_matching" provides the b_idx for other b_str having the same highest score.
-                Avoid using "pllua_" as an a prefix for any alias within either qry_a or qry_b.
-
->>>>>>> 9f6e2093ec52838fa59145ed8f40b6fc460de8a8
                 """.replace('\t','').strip('\n')
             qry="""
                 DROP TYPE IF EXISTS str_match_res CASCADE;
@@ -1714,36 +1707,29 @@ class pgSQL_Functions:
                 );
 
                 DROP FUNCTION IF EXISTS         z_string_matching(  text,text  );
-<<<<<<< HEAD
                 DROP FUNCTION IF EXISTS         z_string_matching(  text,text,text  );
                 CREATE OR REPLACE FUNCTION      z_string_matching(  qry_a text, qry_b text, with_permutations text  )
-=======
-                CREATE OR REPLACE FUNCTION      z_string_matching(  qry_a text, qry_b text  )
->>>>>>> 9f6e2093ec52838fa59145ed8f40b6fc460de8a8
 
                 RETURNS SETOF str_match_res AS $BODY$
 
                     package.loaded.string_matching = nil
                     str_m = require "string_matching"
                     --str_m.jaro_score("MARTHA","MARHTA")
-<<<<<<< HEAD
                     str_m.iter_jaro(qry_a,qry_b,with_permutations)
-=======
-                    str_m.iter_jaro(qry_a,qry_b)
->>>>>>> 9f6e2093ec52838fa59145ed8f40b6fc460de8a8
 
 
                 $BODY$ LANGUAGE plluau;
 
-<<<<<<< HEAD
                 COMMENT ON FUNCTION z_string_matching( text,text,text ) IS '%s';
-=======
-                COMMENT ON FUNCTION z_string_matching( text,text ) IS '%s';
->>>>>>> 9f6e2093ec52838fa59145ed8f40b6fc460de8a8
 
             """ % comment
             self.T.to_sql(                      qry)
         def z_str_comp_lcs(self):
+            comment = """
+
+                Longest Common Subsequence
+
+                """.replace('\t','').strip('\n')
             cmd="""
                 DROP FUNCTION IF EXISTS         z_str_comp_lcs( text,text);
                 CREATE OR REPLACE FUNCTION      z_str_comp_lcs( s1              text,
@@ -1773,7 +1759,10 @@ class pgSQL_Functions:
                 return res
 
                 $BODY$ LANGUAGE plluau;
-            """
+
+            COMMENT ON FUNCTION z_str_comp_lcs( text,text) IS '%s';
+
+            """ % comment
             self.T.to_sql(                      cmd)
 
         def z_update_with_geom_from_coords(self):
@@ -6835,7 +6824,6 @@ class pgSQL_Tables:
 
                         -- SORTING div_line to ensure consistency
                         -- don't know how to do the below in pgSQL, and not worth figuring out for such a small use
-<<<<<<< HEAD
 
                         DO LANGUAGE plpythonu
                         $BODY$
@@ -6854,26 +6842,6 @@ class pgSQL_Tables:
                             if patch:
                                 plpy.execute(patch)
 
-=======
-
-                        DO LANGUAGE plpythonu
-                        $BODY$
-
-                            qry = 'SELECT uid,div_line FROM sub_stations'
-                            res = plpy.execute(qry)
-                            assert len(res)>0
-                            patch = ''
-                            for it in res:
-                                _div,_line = it['div_line'].split('_')
-                                _sorted_div_line = '_'.join([ _div, ''.join(sorted(_line)) ])
-                                if not it['div_line'] == _sorted_div_line:
-                                    patch+="UPDATE sub_stations SET div_line='%s' WHERE uid=%s;" % (_sorted_div_line,it['uid'])
-                                    # plpy.log(patch)
-
-                            if patch:
-                                plpy.execute(patch)
-
->>>>>>> 9f6e2093ec52838fa59145ed8f40b6fc460de8a8
                         $BODY$;
 
                         ------------------------------------- >>>
